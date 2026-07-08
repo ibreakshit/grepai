@@ -62,20 +62,22 @@ type batchBuilder struct {
 	batches       []Batch
 	current       Batch
 	currentTokens int
+	maxBatchSize  int
 }
 
-func newBatchBuilder(estimatedBatches int) *batchBuilder {
+func newBatchBuilder(estimatedBatches, maxBatchSize int) *batchBuilder {
 	return &batchBuilder{
-		batches: make([]Batch, 0, estimatedBatches),
+		maxBatchSize: maxBatchSize,
+		batches:      make([]Batch, 0, estimatedBatches),
 		current: Batch{
 			Index:   0,
-			Entries: make([]BatchEntry, 0, MaxBatchSize),
+			Entries: make([]BatchEntry, 0, maxBatchSize),
 		},
 	}
 }
 
 func (b *batchBuilder) isFull(additionalTokens int) bool {
-	if len(b.current.Entries) >= MaxBatchSize {
+	if len(b.current.Entries) >= b.maxBatchSize {
 		return true
 	}
 	if len(b.current.Entries) > 0 && b.currentTokens+additionalTokens > MaxBatchTokens {
@@ -88,7 +90,7 @@ func (b *batchBuilder) finalizeCurrent() {
 	b.batches = append(b.batches, b.current)
 	b.current = Batch{
 		Index:   len(b.batches),
-		Entries: make([]BatchEntry, 0, MaxBatchSize),
+		Entries: make([]BatchEntry, 0, b.maxBatchSize),
 	}
 	b.currentTokens = 0
 }
@@ -113,13 +115,26 @@ func (b *batchBuilder) build() []Batch {
 // MaxBatchSize (input count) and MaxBatchTokens (token limit).
 // Chunks maintain their file/chunk index tracking for result mapping.
 func FormBatches(files []FileChunks) []Batch {
+	return FormBatchesWithSize(files, MaxBatchSize)
+}
+
+// FormBatchesWithSize is like FormBatches but caps each batch at maxBatchSize
+// inputs instead of the default MaxBatchSize. A maxBatchSize <= 0 or greater than
+// MaxBatchSize falls back to MaxBatchSize (the API ceiling). Lowering it is useful
+// when the embedding endpoint is slow, so a single request stays under the embedder
+// client timeout. The MaxBatchTokens limit still applies.
+func FormBatchesWithSize(files []FileChunks, maxBatchSize int) []Batch {
+	if maxBatchSize <= 0 || maxBatchSize > MaxBatchSize {
+		maxBatchSize = MaxBatchSize
+	}
+
 	totalChunks := countTotalChunks(files)
 	if totalChunks == 0 {
 		return nil
 	}
 
-	estimatedBatches := (totalChunks + MaxBatchSize - 1) / MaxBatchSize
-	builder := newBatchBuilder(estimatedBatches)
+	estimatedBatches := (totalChunks + maxBatchSize - 1) / maxBatchSize
+	builder := newBatchBuilder(estimatedBatches, maxBatchSize)
 
 	for _, file := range files {
 		for chunkIdx, chunk := range file.Chunks {

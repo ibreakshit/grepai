@@ -197,6 +197,26 @@ embedder:
 - On rate limit (429), parallelism auto-reduces and retries with backoff
 - After successful requests, parallelism gradually restores
 
+### Batch Size
+
+By default grepai packs up to `MaxBatchSize` (2000) inputs into each embedding
+request. For slow or self-hosted embedding endpoints, a large request can exceed
+the embedder's client timeout and fail the whole scan. Lower `batch_size` so each
+request stays under the timeout — indexing then runs as more, smaller requests
+(slower overall, but reliable). Pair it with `parallelism: 1` on throughput-bound
+endpoints, where concurrent requests just split a fixed throughput.
+
+```yaml
+embedder:
+  provider: openai
+  model: text-embedding-3-small
+  api_key: ${OPENAI_API_KEY}
+  parallelism: 1   # serialize on a slow, throughput-bound endpoint
+  batch_size: 20   # ~20 inputs per request keeps each call short
+```
+
+Values `<= 0` or above `MaxBatchSize` fall back to the default 2000.
+
 #### Recommended Parallelism by Tier
 
 Higher OpenAI tiers allow more concurrent requests. Use the table below as a starting point:

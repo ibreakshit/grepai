@@ -995,6 +995,7 @@ func watchProjectWithEventObserver(ctx context.Context, projectRoot string, emb 
 
 	// Initialize indexer
 	idx := indexer.NewIndexer(projectRoot, st, emb, chunker, scanner, cfg.Watch.LastIndexTime, processorRegistry)
+	idx.SetBatchSize(cfg.Embedder.BatchSize)
 
 	// Initialize symbol store and extractor
 	symbolStore := trace.NewGOBSymbolStore(config.GetSymbolIndexPath(projectRoot))
@@ -2762,6 +2763,7 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 		projectPath:   project.Path,
 	}
 	idx := indexer.NewIndexer(project.Path, vectorStore, emb, chunker, scanner, projectCfg.Watch.LastIndexTime, processorRegistry)
+	idx.SetBatchSize(projectCfg.Embedder.BatchSize)
 	extractor := trace.NewRegexExtractor()
 	symbolStore := trace.NewGOBSymbolStore(config.GetSymbolIndexPath(project.Path))
 	if err := symbolStore.Load(ctx); err != nil {

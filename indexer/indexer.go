@@ -19,6 +19,7 @@ type Indexer struct {
 	scanner       *Scanner
 	processor     *framework.ProcessorRegistry
 	lastIndexTime time.Time
+	batchSize     int
 }
 
 type IndexStats struct {
@@ -76,6 +77,17 @@ func NewIndexer(
 		scanner:       scanner,
 		processor:     processor,
 		lastIndexTime: lastIndexTime,
+		batchSize:     embedder.MaxBatchSize,
+	}
+}
+
+// SetBatchSize overrides the maximum number of inputs per embedding request for
+// this indexer. Values <= 0 (or above embedder.MaxBatchSize) are ignored, keeping
+// the default. Lower it for slow embedding endpoints so each request stays under
+// the embedder client timeout.
+func (idx *Indexer) SetBatchSize(n int) {
+	if n > 0 && n <= embedder.MaxBatchSize {
+		idx.batchSize = n
 	}
 }
 
@@ -418,7 +430,7 @@ func (idx *Indexer) indexFilesBatched(
 
 	// Embed remaining (non-cached) files
 	if len(remainingFileChunks) > 0 {
-		batches := embedder.FormBatches(remainingFileChunks)
+		batches := embedder.FormBatchesWithSize(remainingFileChunks, idx.batchSize)
 		results, err := batchEmb.EmbedBatches(ctx, batches, wrapBatchProgress(onProgress))
 		if err != nil {
 			return filesIndexed, chunksCreated, fmt.Errorf("failed to embed batches: %w", err)

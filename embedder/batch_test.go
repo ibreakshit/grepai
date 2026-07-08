@@ -475,3 +475,51 @@ func TestFormBatches_SmallChunksIgnoreTokenLimit(t *testing.T) {
 		t.Errorf("first batch should have %d entries, got %d", MaxBatchSize, len(batches[0].Entries))
 	}
 }
+
+func TestFormBatchesWithSize_CustomSize(t *testing.T) {
+	chunks := make([]string, 77)
+	for i := range chunks {
+		chunks[i] = "chunk"
+	}
+	files := []FileChunks{{FileIndex: 0, Chunks: chunks}}
+
+	// 77 chunks capped at 20 per batch -> 20, 20, 20, 17.
+	batches := FormBatchesWithSize(files, 20)
+	if len(batches) != 4 {
+		t.Fatalf("expected 4 batches for 77 chunks at size 20, got %d", len(batches))
+	}
+	for i, want := range []int{20, 20, 20, 17} {
+		if got := len(batches[i].Entries); got != want {
+			t.Errorf("batch %d: expected %d entries, got %d", i, want, got)
+		}
+	}
+}
+
+func TestFormBatchesWithSize_FallbackToDefault(t *testing.T) {
+	chunks := make([]string, MaxBatchSize+10)
+	for i := range chunks {
+		chunks[i] = "chunk"
+	}
+	files := []FileChunks{{FileIndex: 0, Chunks: chunks}}
+
+	// n <= 0 or n > MaxBatchSize both fall back to MaxBatchSize.
+	for _, n := range []int{0, -5, MaxBatchSize + 100} {
+		batches := FormBatchesWithSize(files, n)
+		if len(batches[0].Entries) != MaxBatchSize {
+			t.Errorf("size %d: first batch should cap at %d, got %d", n, MaxBatchSize, len(batches[0].Entries))
+		}
+	}
+}
+
+// FormBatches must remain equivalent to FormBatchesWithSize(files, MaxBatchSize).
+func TestFormBatches_DelegatesToDefault(t *testing.T) {
+	chunks := make([]string, MaxBatchSize+50)
+	for i := range chunks {
+		chunks[i] = "chunk"
+	}
+	files := []FileChunks{{FileIndex: 0, Chunks: chunks}}
+
+	if got, want := len(FormBatches(files)), len(FormBatchesWithSize(files, MaxBatchSize)); got != want {
+		t.Errorf("FormBatches produced %d batches, FormBatchesWithSize(MaxBatchSize) produced %d", got, want)
+	}
+}

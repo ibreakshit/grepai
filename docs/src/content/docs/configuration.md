@@ -29,6 +29,9 @@ embedder:
   dimensions: 768
   # Concurrent batch requests for OpenAI (default: 4)
   parallelism: 4
+  # Max inputs per embedding request (default: 2000). Lower it for slow
+  # endpoints so a single request stays under the client timeout.
+  batch_size: 2000
 
 # Vector store configuration
 store:

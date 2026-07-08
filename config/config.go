@@ -111,7 +111,8 @@ type EmbedderConfig struct {
 	Endpoint    string `yaml:"endpoint,omitempty"`
 	APIKey      string `yaml:"api_key,omitempty"`
 	Dimensions  *int   `yaml:"dimensions,omitempty"`
-	Parallelism int    `yaml:"parallelism"` // Number of parallel workers for batch embedding (default: 4)
+	Parallelism int    `yaml:"parallelism"`          // Number of parallel workers for batch embedding (default: 4)
+	BatchSize   int    `yaml:"batch_size,omitempty"` // Max inputs per embedding request (default: 2000). Lower it for slow endpoints so a request stays under the client timeout.
 }
 
 // GetDimensions returns the configured dimensions or a default value.
