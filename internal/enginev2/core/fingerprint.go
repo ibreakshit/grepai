@@ -39,7 +39,7 @@ func (f IndexingFingerprint) Canonical() []byte {
 	writeCanonicalString(&buf, f.EmbedderProvider)
 	writeCanonicalString(&buf, f.EmbedderModel)
 
-	binary.BigEndian.PutUint64(scratch[:8], uint64(f.Dimensions))
+	binary.BigEndian.PutUint64(scratch[:8], uint64(f.Dimensions)) // #nosec G115 - embedding dimension is a small non-negative config value
 	buf.Write(scratch[:8])
 
 	writeCanonicalString(&buf, f.ChunkerImplementation)
@@ -49,7 +49,7 @@ func (f IndexingFingerprint) Canonical() []byte {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	binary.BigEndian.PutUint32(scratch[:4], uint32(len(keys)))
+	binary.BigEndian.PutUint32(scratch[:4], uint32(len(keys))) // #nosec G115 - map length is non-negative
 	buf.Write(scratch[:4])
 	for _, k := range keys {
 		writeCanonicalString(&buf, k)
@@ -70,7 +70,7 @@ func (f IndexingFingerprint) Hash() string {
 
 func writeCanonicalString(buf *bytes.Buffer, s string) {
 	var lenBuf [4]byte
-	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s)))
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(s))) // #nosec G115 - string length is non-negative
 	buf.Write(lenBuf[:])
 	buf.WriteString(s)
 }

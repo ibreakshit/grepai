@@ -40,7 +40,7 @@ func (f *GitFixture) WriteFile(relPath, content string) {
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		f.t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
 		f.t.Fatalf("write: %v", err)
 	}
 }

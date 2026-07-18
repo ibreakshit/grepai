@@ -20,7 +20,7 @@ type Stats struct {
 type Scheduler interface {
 	// Submit enqueues a job at its Priority.
 	Submit(ctx context.Context, job core.Job) error
-	// Run drives the scheduler loop until ctx is cancelled.
+	// Run drives the scheduler loop until ctx is canceled.
 	Run(ctx context.Context) error
 	// Stats returns a current snapshot.
 	Stats() Stats

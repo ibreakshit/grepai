@@ -39,7 +39,8 @@ func TestHashDeterministicAndMapOrderIndependent(t *testing.T) {
 	if a.Hash() != b.Hash() {
 		t.Fatalf("hash not order-independent: %s != %s", a.Hash(), b.Hash())
 	}
-	if a.Hash() != a.Hash() {
+	h1, h2 := a.Hash(), a.Hash()
+	if h1 != h2 {
 		t.Fatal("hash not deterministic across calls")
 	}
 	if len(a.Hash()) != 64 {
