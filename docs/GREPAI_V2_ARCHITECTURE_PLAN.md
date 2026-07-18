@@ -10,7 +10,7 @@ Build a production-grade GrepAI indexing control plane for parallel coding agent
 
 The defining runtime invariant is:
 
-> If repository contents and the indexing fingerprint have not changed, GrepAI sends zero indexing embedding requests.
+> If repository contents and the indexing fingerprint have not changed, GrepAI sends zero indexing backend requests — no embeddings and no RPG LLM feature extraction.
 
 The architecture is a strangler rewrite inside the existing fork. GrepAI remains the product, CLI, MCP, parsing, transformation, search, and trace compatibility boundary. A new host-level daemon replaces the current watch, retry, persistence, and per-worktree indexing lifecycle.
 
@@ -33,8 +33,8 @@ Existing PRs provide useful mitigations, including [worktree discovery opt-out](
 
 These invariants are release blockers for v2:
 
-1. **Idle means idle.** No indexing embedding requests occur without a content or indexing-fingerprint change.
-2. **One host, one scheduler.** All repositories and worktrees share one embedding concurrency and token budget.
+1. **Idle means idle.** No indexing backend requests — embedding or LLM feature extraction — occur without a content or indexing-fingerprint change.
+2. **One host, one scheduler.** All repositories and worktrees share one backend concurrency and token budget covering embedding, reranking, and RPG LLM extraction.
 3. **MCP is read/query oriented.** Starting an MCP session never launches a full scan or an independent indexing process.
 4. **Worktree isolation.** A search issued from one worktree cannot return a file version that exists only in another worktree.
 5. **Shared immutable work.** Identical file artifacts in the same repository are parsed and embedded once, then referenced by many worktree views.
@@ -52,7 +52,7 @@ These invariants are release blockers for v2:
 
 - GrepAI runs on one developer host as a user-level service.
 - Git worktrees are the main isolation mechanism for parallel agents.
-- The production embedding and reranking endpoints are OpenAI-compatible services accessed through LiteLLM.
+- The production embedding, reranking, and completion (RPG extraction) endpoints are OpenAI-compatible services accessed through LiteLLM.
 - A single host may index multiple repositories, so repository-local daemons are not sufficient for global GPU governance.
 - The initial production backend is a local SQLite catalog with vectors loaded into a daemon-managed in-memory search index.
 
@@ -63,6 +63,8 @@ These invariants are release blockers for v2:
 - Replacing the current search ranking model.
 - Requiring Postgres or Qdrant parity before the local production path is ready.
 - Combining the control-plane rewrite with a mandatory semantic-chunking migration.
+- macOS and Windows daemon parity. The Unix-socket/systemd service targets Linux first; the v1 engine (which supports those platforms today via `daemon_windows.go` and friends) remains the path there until the transport and service packaging are ported.
+- Moving RPG graph storage into the SQLite catalog. RPG scheduling and LLM traffic do move under the daemon (Sections 5.3, 5.4, 6); the storage migration is a later, fingerprinted change.
 
 The existing chunker remains supported for migration and search-parity validation. Stable semantic chunking can be introduced later as a new fingerprinted index generation without changing the control-plane contracts.
 
@@ -78,6 +80,7 @@ Reuse stable leaf behavior:
 - current chunker for compatibility
 - hybrid search and path boosting
 - symbol extraction and trace
+- RPG graph model, query engine, and atomic GOB store
 - CLI and MCP request/response contracts
 - existing fixtures and language tests
 
@@ -95,7 +98,7 @@ Replace the current lifecycle:
 
 A single `grepaid` user service manages every registered repository and worktree on the host.
 
-The daemon governs every embedding and reranking request issued by GrepAI. Unrelated applications that call the same LiteLLM endpoint remain outside its authority and must be capacity-managed separately.
+The daemon governs every backend request issued by GrepAI: embeddings, reranking, and RPG LLM feature extraction. Unrelated applications that call the same LiteLLM endpoint remain outside its authority and must be capacity-managed separately.
 
 ```text
 Agents / MCP / grepai CLI
@@ -118,7 +121,7 @@ Agents / MCP / grepai CLI
     SQLite WAL catalog + vector data
             |
             v
-    embedding and reranking endpoints
+    embedding, reranking, and completion endpoints
 ```
 
 CLI and MCP processes become stateless RPC clients. Service startup is controlled by a systemd user unit and guarded by a singleton lock. Concurrent clients may request service activation, but they cannot create multiple schedulers.
@@ -133,6 +136,8 @@ repository_id
 + source_hash_or_git_blob_oid
 + indexing_fingerprint
 ```
+
+`repository_id` derives from the canonical Git common directory (canonical root path for non-Git projects) and is assigned at registration, so all worktrees of one repository share a namespace and a reused directory path cannot silently inherit another repository's identity.
 
 The indexing fingerprint includes:
 
@@ -153,6 +158,10 @@ Common Git blobs at the same relative path reuse an existing artifact. Worktree-
 
 Chunk-vector cache identity is based on the repository namespace, indexing fingerprint, and the hash of the exact text sent to the embedder. It is not based on raw code text alone.
 
+The indexing fingerprint is serialized through a **versioned canonical encoding**: a fixed-field struct carrying an explicit `encoding_version`, deterministic field ordering, and typed (not free-form JSON) values, hashed with SHA-256. The human-readable component fields are stored alongside the hash. Bumping `encoding_version` is a deliberate, auditable cache invalidation; serialization drift (float formatting, key escaping, whitespace) cannot silently change a key.
+
+Trace symbols and RPG features are derived data. Symbol (call-graph) extraction is stored per artifact and inherits the artifact's identity, so trace answers resolve through the same worktree views and generations as search. RPG feature labels additionally include the extractor mode, model, and prompt version in their cache identity, so LLM-labeled features are never reused across incompatible extractors and are refreshed only for changed artifacts.
+
 ### 5.4 Durable desired-state jobs
 
 Jobs represent desired file state rather than individual filesystem events:
@@ -168,7 +177,7 @@ Job priorities are:
 1. interactive query embeddings and reranking
 2. live file changes
 3. worktree reconciliation
-4. bootstrap and controlled generation rebuilds
+4. bootstrap, controlled generation rebuilds, and RPG refresh (including its LLM extraction)
 
 The scheduler applies one host-wide maximum in-flight request count, token-aware batch limits, fair worktree/repository scheduling, and reserved capacity for interactive traffic.
 
@@ -200,6 +209,8 @@ For Git repositories, reconciliation uses:
 Filesystem events wake and narrow reconciliation. They do not directly establish final deletes or renames during high-volume Git operations. Event overflow, watcher errors, or a branch-switch burst marks the worktree dirty and schedules a truth reconciliation.
 
 For non-Git projects, metadata narrows candidates and content hashes confirm changes.
+
+Watch registration is bounded. A single daemon watching every registered worktree can exhaust platform watch descriptors (inotify limits with many large worktrees), so watcher setup failures and descriptor exhaustion degrade the affected worktrees to periodic reconciliation with a visible degraded status. Watcher failures never crash-loop the daemon and never silently stop freshness.
 
 ### 5.6 Atomic update protocol
 
@@ -237,9 +248,13 @@ Model, dimension, transform, or chunker changes create a new index generation. T
 
 There is no implicit destructive rebuild. Full rebuilds are explicit administrative operations with status, estimated scope, cancellation, and rollback.
 
+### 5.9 Retention and garbage collection
+
+Artifacts, chunks, and vectors become garbage only when no live worktree view and no retained generation references them. A low-priority maintenance task collects garbage under an explicit retention policy: the previous generation is kept until a configured age passes or an operator prunes it. GC deletes are transactional, so a crash mid-collection cannot break referential integrity, and GC never runs while a controlled rebuild is active. SQLite space is reclaimed with incremental vacuum during maintenance windows; deleted vectors do not otherwise shrink the database file.
+
 ## 6. Durable catalog
 
-SQLite in WAL mode is the source of truth for the local v2 engine. The initial schema contains:
+SQLite in WAL mode is the source of truth for the local v2 engine. The driver is **`modernc.org/sqlite`** (pure Go), chosen so the daemon and CLI keep building under the fork's existing `CGO_ENABLED=0` cross-compilation pipeline (`.goreleaser.yml`) without a per-target C toolchain. The catalog/vector interface stays replaceable (Section 13) if a cgo driver or a dedicated vector index later proves necessary. The initial schema contains:
 
 - `schema_migrations`
 - `repositories`
@@ -248,6 +263,8 @@ SQLite in WAL mode is the source of truth for the local v2 engine. The initial s
 - `file_artifacts`
 - `chunks`
 - `artifact_chunks`
+- `symbols`
+- `symbol_edges`
 - `worktree_files`
 - `index_jobs`
 - `dead_letter_jobs`
@@ -255,9 +272,13 @@ SQLite in WAL mode is the source of truth for the local v2 engine. The initial s
 
 Vectors are stored as validated float32 blobs with their dimensions and fingerprint. The daemon loads active-generation vectors into its in-memory search structure and updates that structure only after the corresponding database transaction commits.
 
-Foreign keys, uniqueness constraints, generation checks, and repository namespace checks enforce isolation. Database writes use transactions; migration and backup operations use SQLite's supported online backup mechanisms rather than copying live files.
+Trace call-graph data is catalog-resident: `symbols` and `symbol_edges` are artifact-scoped, replacing the per-worktree symbol GOB store so trace inherits the same atomicity, isolation, and generation guarantees as search. The RPG graph is the exception: it keeps its existing atomic per-worktree GOB store in the first release, with only its rebuild triggering and LLM traffic moving under the daemon (Section 4 non-goals).
+
+Foreign keys, uniqueness constraints, generation checks, and repository namespace checks enforce isolation. Database writes use transactions and flow through a single serialized writer with a configured busy timeout; readers use WAL snapshot reads so search loading never blocks commits. Migration and backup operations use SQLite's supported online backup mechanisms rather than copying live files.
 
 ## 7. Public service contracts
+
+The transport is **JSON-RPC 2.0 over the Unix domain socket**, chosen to match the fork's existing `--json` CLI/MCP contracts and MCP's own JSON-RPC transport, avoiding a `.proto` codegen step in the build. Requests are framed with `Content-Length` headers; request/response correlation, batching, and error codes follow the JSON-RPC 2.0 spec.
 
 The Unix-socket API must support:
 
@@ -266,12 +287,15 @@ The Unix-socket API must support:
 - search within an explicit worktree view
 - trace within an explicit worktree view
 - query indexing and freshness status
-- wait for selected paths to become fresh
+- wait for selected paths to become fresh, with a bounded deadline
 - start/cancel a controlled generation rebuild
 - inspect/retry/clear dead-letter work
+- list and resolve named workspaces as sets of registered repositories
 - expose health and scheduler state
 
 CLI and MCP calls resolve worktree identity from the current directory when possible. Ambiguous or missing identity is an error, not a fallback to another worktree's index.
+
+Existing commands remain as thin clients during migration: `grepai watch` degrades to ensure-registered plus reconcile plus status tailing (with a deprecation notice), `grepai init` additionally registers the project with the daemon, and search/trace flags keep their current contracts so agent integrations do not break. v1 named workspaces map onto the registry as named repository sets; per-workspace and per-worktree watch daemons are retired.
 
 Search responses include freshness metadata when relevant:
 
@@ -296,21 +320,30 @@ Search responses include freshness metadata when relevant:
 
 ### Existing areas to adapt
 
-- `cmd/grepai/` and `cli/`: daemon-aware clients and v2 administration
+- `cmd/grepai/` and `cli/`: daemon-aware clients and v2 administration, including workspace commands mapped to the registry
 - `mcp/`: query-only RPC integration and explicit worktree context
 - `indexer/`: reusable scanner/chunker logic separated from legacy orchestration
 - `embedder/`: transports wrapped by the global scheduler
+- `watcher/`: retained as the fsnotify event source, re-wired to feed the reconciler's hint queue instead of driving indexing directly
+- `git/`: extended with tree/blob OID and name-status helpers for reconciliation
 - `search/`: active worktree/generation filtering
-- `trace/`: worktree/generation filtering
+- `trace/`: extraction reused; symbol persistence moves to the catalog with worktree/generation filtering
+- `rpg/`: graph, query engine, and store reused; refresh scheduling and LLM extraction move under the daemon; search/MCP enrichment resolves against the query's worktree view
 - `config/`: `engine: v2`, daemon, scheduler, and migration configuration
 - `daemon/`: legacy code retained only for v1 compatibility during migration
 - `store/`: legacy backends retained behind v1; SQLite catalog becomes the v2 local path
 
 ## 9. Implementation steps and gates
 
-Intermediate work remains behind `engine: v2`. Production cutover is prohibited until Gates 1 through 6 pass together.
+Intermediate work remains behind `engine: v2`. Production cutover is prohibited until Gates 0 through 6 pass together.
 
 ### Phase 0: Architecture contracts and test harness
+
+Resolved implementation decisions (settled before Phase 0 code):
+
+- **SQLite driver:** `modernc.org/sqlite` (pure Go), preserving `CGO_ENABLED=0` cross-compilation (Section 6).
+- **RPC transport:** JSON-RPC 2.0 over the Unix socket with `Content-Length` framing (Section 7).
+- **Fingerprint encoding:** versioned canonical struct hashed with SHA-256, `encoding_version` gated (Section 5.3).
 
 Deliverables:
 
@@ -330,7 +363,7 @@ Gate 0:
 Deliverables:
 
 - versioned SQLite schema and migration runner
-- repositories, worktrees, generations, artifacts, chunks, views, and jobs
+- repositories, worktrees, generations, artifacts, chunks, symbols, views, and jobs
 - vector encoding validation
 - repository-scoped fingerprinted cache
 - atomic worktree view switching
@@ -348,6 +381,7 @@ Deliverables:
 - Git tree/blob, dirty, staged, deleted, renamed, and untracked reconciliation
 - non-Git metadata/content fallback
 - fsnotify event aggregation and overflow recovery
+- watch-descriptor exhaustion fallback to periodic reconciliation
 - branch-switch quiescence and truth reconciliation
 - worktree discovery with no automatic index copying
 
@@ -364,6 +398,8 @@ Deliverables:
 - exact-input chunk cache lookup
 - cache-miss-only embedding
 - vector validation
+- artifact-scoped symbol extraction
+- scheduled RPG refresh with LLM extraction routed through the global scheduler
 - superseded-generation protection
 - atomic artifact/view/job commit
 - dead-letter classification
@@ -411,7 +447,7 @@ Gate 5:
 
 Deliverables:
 
-- read-only GOB import
+- read-only import of all legacy GOB stores: vector index, symbol store, and RPG graph
 - explicit legacy fingerprint assertion
 - embedding-disabled reconciliation dry run
 - search-parity comparison tooling
@@ -419,7 +455,7 @@ Deliverables:
 
 Gate 6:
 
-- imported file/chunk counts reconcile with legacy indexes
+- imported file, chunk, and symbol counts reconcile with legacy indexes
 - representative search and trace results meet the agreed parity threshold
 - dry-run reconciliation identifies only real deltas
 
@@ -446,9 +482,9 @@ Gate 7:
 
 ### Automated correctness
 
-- Restart the daemon 100 times with unchanged repositories: zero indexing embedding calls.
+- Restart the daemon 100 times with unchanged repositories: zero indexing backend calls.
 - Reconcile seven worktrees sharing a base: common file artifacts are built once.
-- Change one file in one worktree: no other worktree view changes.
+- Change one file in one worktree: no other worktree's search or trace view changes.
 - Save a file repeatedly while work is queued: only the newest generation commits.
 - Switch branches with hundreds of changes: the final indexed view exactly matches the checkout.
 - Overflow the filesystem event channel: reconciliation repairs every missed state.
@@ -463,20 +499,21 @@ Gate 7:
 - Keep the embedding endpoint unavailable for one hour: requests remain bounded and the daemon does not restart.
 - Return repeated 429 and 5xx responses: backoff, jitter, and the circuit breaker behave deterministically.
 - Return permanent 4xx errors: jobs dead-letter without automatic retry storms.
+- Exhaust filesystem watch descriptors: affected worktrees degrade to periodic reconciliation with a visible status warning; the daemon does not crash-loop.
 - Run ten parallel agent searches during background indexing: interactive work meets the agreed latency budget.
 - Bootstrap multiple repositories simultaneously: total indexing concurrency never exceeds the host limit.
 
 ### Production-host soak
 
 - Register the main Longwave worktree and all active feature worktrees.
-- Run one hour with no edits: zero indexing `/v1/embeddings` requests and an idle GPU aside from explicit queries.
+- Run one hour with no edits: zero indexing `/v1/embeddings` requests, zero RPG feature-extraction completion requests, and an idle GPU aside from explicit queries.
 - Make controlled edits, renames, deletions, and branch switches in separate worktrees.
 - Confirm request reasons, artifact cache hits, queue depth, and final search isolation.
 - Exercise concurrent Longwave, NanoClaw, and Antler agent sessions against the same daemon.
 
 ### Operational service levels
 
-- An unchanged repository reaches idle after startup reconciliation with zero indexing embedding requests.
+- An unchanged repository reaches idle after startup reconciliation with zero indexing backend requests.
 - With an empty background queue and a healthy endpoint, a changed file becomes eligible for indexing within one second after the configured quiescence window.
 - Interactive query work is admitted within 250 ms while background indexing is active, excluding time spent inside external embedding or reranking services.
 - Background indexing never exceeds `scheduler.max_index_inflight`.
@@ -494,7 +531,8 @@ Gate 7:
 - queue depth by priority and repository
 - active requests and token estimates
 - cache hits and misses
-- embedding requests by reason: query, file change, reconcile, rebuild, retry
+- backend requests by type (embedding, rerank, RPG extraction) and reason: query, file change, reconcile, rebuild, retry
+- filesystem watch descriptor usage and per-worktree reconciliation fallback state
 - retry attempts, next retry time, circuit state, and dead letters
 - artifact and vector counts plus garbage-collection candidates
 
@@ -509,7 +547,7 @@ Logs use structured fields for repository, worktree, path, generation, artifact,
 - RPC callers cannot request arbitrary filesystem paths outside a registered worktree.
 - Symlink and path-replacement tests verify that path validation cannot be bypassed between registration, reconciliation, and file reads.
 - Database migrations are transactional and version-checked.
-- Dead-letter diagnostics redact credentials and embedding inputs.
+- Dead-letter diagnostics redact credentials, embedding inputs, and LLM extraction prompts.
 - Legacy imports never mutate their source GOB files.
 
 ## 13. Risks and mitigations
@@ -518,7 +556,7 @@ Logs use structured fields for repository, worktree, path, generation, artifact,
 
 Risk: 4096-dimensional vectors may increase database size and daemon startup memory.
 
-Mitigation: benchmark the actual Longwave corpus during Phase 1, store validated compact float32 blobs, load only active generations, and keep the catalog/vector interface replaceable if an mmap or dedicated local vector index becomes necessary.
+Mitigation: benchmark database size, memory, and daemon startup load time on the actual Longwave corpus during Phase 1, store validated compact float32 blobs, load only active generations, and keep the catalog/vector interface replaceable if an mmap or dedicated local vector index becomes necessary.
 
 ### Search behavior drift
 
@@ -531,6 +569,12 @@ Mitigation: preserve the current chunk format for initial migration. Introduce s
 Risk: removed worktree paths may later be reused for different Git worktrees.
 
 Mitigation: bind views to canonical root, Git common directory, worktree identity, and registration generation. A reused path cannot inherit an old view without reconciliation.
+
+### Watcher scale
+
+Risk: one daemon watching every registered worktree concentrates filesystem watch descriptors in a single process and can hit platform limits that per-worktree daemons only hit in aggregate.
+
+Mitigation: bounded per-worktree watch registration, the periodic-reconciliation fallback with visible degraded status (Section 5.5), and descriptor usage metrics (Section 11).
 
 ### Daemon availability
 
@@ -549,7 +593,7 @@ Mitigation: keep v2 behind clean internal interfaces, reuse leaf packages, freez
 Before cutover:
 
 - preserve the legacy binary
-- retain immutable copies of every legacy GOB index and config
+- retain immutable copies of every legacy GOB index (vector, symbol, and RPG) and config
 - record the exact embedding fingerprint used for import
 - keep `engine: v2` as an explicit switch
 
