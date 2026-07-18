@@ -13,6 +13,7 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/catalog"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/enginetest"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/scheduler"
 )
 
 // Invariant 4 (worktree isolation): a search from one worktree cannot return a
@@ -31,6 +32,9 @@ func TestInvariant_WorktreeIsolation(t *testing.T) {
 	}
 	if _, ok, _ := c.ResolveView(ctx, "wt2", "a.go"); ok {
 		t.Fatal("invariant 4 violated: wt2 resolved wt1's private view")
+	}
+	if id, ok, _ := c.ResolveView(ctx, "wt1", "a.go"); !ok || id != art.ID {
+		t.Fatal("invariant 4: wt1 must resolve its own committed view")
 	}
 }
 
@@ -84,6 +88,8 @@ func TestInvariant_IdleMeansIdle(t *testing.T) {
 // artifact searchable. Implemented in Phase 3.
 func TestInvariant_AtomicVisibility(t *testing.T) {
 	t.Skip("Phase 3: artifact indexer commit protocol required")
+	// Scaffold: the atomic commit surface under test is catalog.Catalog.CommitUpdate.
+	var _ catalog.Catalog = enginetest.NewFakeCatalog()
 }
 
 // Invariant 7 (durable progress): committed work survives a crash at any
@@ -97,4 +103,6 @@ func TestInvariant_DurableProgress(t *testing.T) {
 // no restart loop. Implemented in Phase 4 (scheduler + circuit breaker).
 func TestInvariant_BoundedFailure(t *testing.T) {
 	t.Skip("Phase 4: scheduler circuit breaker required")
+	// Scaffold: bounded failure is a property of the scheduler.Scheduler surface.
+	var _ scheduler.Scheduler
 }

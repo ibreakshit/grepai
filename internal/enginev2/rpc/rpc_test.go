@@ -26,19 +26,19 @@ func TestRequestRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesStable(t *testing.T) {
-	want := map[string]string{
-		"register":    MethodRegister,
-		"reconcile":   MethodReconcile,
-		"search":      MethodSearch,
-		"trace":       MethodTrace,
-		"status":      MethodStatus,
-		"waitFresh":   MethodWaitFresh,
-		"rebuild":     MethodRebuild,
-		"deadLetters": MethodDeadLetters,
+	checks := []struct{ got, want string }{
+		{MethodRegister, "grepai.register"},
+		{MethodReconcile, "grepai.reconcile"},
+		{MethodSearch, "grepai.search"},
+		{MethodTrace, "grepai.trace"},
+		{MethodStatus, "grepai.status"},
+		{MethodWaitFresh, "grepai.waitFresh"},
+		{MethodRebuild, "grepai.rebuild"},
+		{MethodDeadLetters, "grepai.deadLetters"},
 	}
-	for short, full := range want {
-		if full == "" {
-			t.Fatalf("method %q is empty", short)
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Fatalf("method constant = %q, want %q", c.got, c.want)
 		}
 	}
 	if Version != "2.0" {

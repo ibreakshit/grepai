@@ -73,6 +73,15 @@ func (c *FakeCatalog) CommitUpdate(ctx context.Context, req core.CommitRequest, 
 	defer c.mu.Unlock()
 	c.artifacts[req.Artifact.Key] = req.Artifact
 	c.views[viewKey{req.View.WorktreeID, req.View.Path}] = req.View
+	// Mark the job complete: a committed (worktree, path) is no longer queued,
+	// regardless of whether it was claimed first (crash-recovery replay may
+	// commit an upserted-but-unclaimed job).
+	for i, existing := range c.jobs {
+		if existing.WorktreeID == job.WorktreeID && existing.Path == job.Path {
+			c.jobs = append(c.jobs[:i], c.jobs[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 

@@ -56,3 +56,19 @@ func TestFakeEmbedderDeterministicVectors(t *testing.T) {
 		}
 	}
 }
+
+func TestFakeEmbedderSetError(t *testing.T) {
+	e := NewFakeEmbedder(4)
+	sticky := errors.New("down")
+	e.SetError(sticky)
+	if _, err := e.Embed(context.Background(), "x"); !errors.Is(err, sticky) {
+		t.Fatalf("expected sticky error, got %v", err)
+	}
+	if _, err := e.Embed(context.Background(), "y"); !errors.Is(err, sticky) {
+		t.Fatalf("sticky error must persist, got %v", err)
+	}
+	e.SetError(nil)
+	if _, err := e.Embed(context.Background(), "z"); err != nil {
+		t.Fatalf("clearing sticky error should restore success, got %v", err)
+	}
+}

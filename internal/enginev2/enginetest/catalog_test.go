@@ -67,3 +67,22 @@ func TestFakeCatalogJobPriorityClaim(t *testing.T) {
 		t.Fatalf("expected highest-priority (live change) first, got %v", job.Priority)
 	}
 }
+
+func TestFakeCatalogCommitCompletesUnclaimedJob(t *testing.T) {
+	c := NewFakeCatalog()
+	ctx := context.Background()
+	_ = c.UpsertJob(ctx, core.Job{WorktreeID: "wt1", Path: "a.go", Generation: 1, Priority: core.PriorityLiveChange})
+	key := core.ArtifactKey{RepositoryID: "r", RelativePath: "a.go", SourceHash: "oid", Fingerprint: "fp"}
+	art := core.Artifact{ID: key.ArtifactID(), Key: key}
+	req := core.CommitRequest{
+		View:     core.ViewEntry{WorktreeID: "wt1", Path: "a.go", ArtifactID: art.ID, Generation: 1},
+		Artifact: art,
+	}
+	job := core.Job{WorktreeID: "wt1", Path: "a.go", Generation: 1, Operation: core.OpUpsert}
+	if err := c.CommitUpdate(ctx, req, job); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, ok, _ := c.ClaimNextJob(ctx, core.PriorityBootstrap); ok {
+		t.Fatal("committed job must not remain claimable")
+	}
+}
