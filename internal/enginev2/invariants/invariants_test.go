@@ -197,23 +197,39 @@ func TestInvariant_AtomicVisibility(t *testing.T) {
 	w := newWorker(cat, emb, load, worker.NoCrash)
 
 	mustErr(t, cat.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
-	_, err := w.ProcessOne(ctx)
-	mustErr(t, err)
+	if did, err := w.ProcessOne(ctx); err != nil || !did {
+		t.Fatalf("first index: did=%v err=%v", did, err)
+	}
 	v1, ok, _ := cat.ResolveView(ctx, "w", "a.go")
 	if !ok {
 		t.Fatal("v1 must be committed")
 	}
 
+	// The second version's embedding fails on every attempt.
 	emb.SetError(errors.New("endpoint down"))
+	embedsBefore := emb.EmbedCalls()
 	mustErr(t, cat.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h2", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	deadLettered := false
 	for i := 0; i < 12; i++ {
 		if _, err := w.ProcessOne(ctx); err != nil {
 			t.Fatal(err)
 		}
 		if n, _ := cat.DeadLetterCount(ctx); n > 0 {
+			deadLettered = true
 			break
 		}
 	}
+	// Prove the failure actually occurred (else v1==v2 would pass vacuously).
+	if !deadLettered {
+		t.Fatal("second embedding should have failed and dead-lettered")
+	}
+	if n, _ := cat.DeadLetterCount(ctx); n != 1 {
+		t.Fatalf("expected exactly one dead-letter, got %d", n)
+	}
+	if emb.EmbedCalls() <= embedsBefore {
+		t.Fatalf("the failing second job never attempted an embed: %d -> %d", embedsBefore, emb.EmbedCalls())
+	}
+	// Invariant 6: the view still resolves the first (fully-committed) artifact.
 	v2, ok, _ := cat.ResolveView(ctx, "w", "a.go")
 	if !ok || v2 != v1 {
 		t.Fatalf("invariant 6 violated: a failed embedding changed the searchable view (v1=%s v2=%s ok=%v)", v1, v2, ok)
@@ -282,10 +298,22 @@ func TestInvariant_BoundedFailure(t *testing.T) {
 	if e.Stats().Circuit != "open" {
 		t.Fatal("invariant 8 violated: breaker should open under a persistent outage")
 	}
+	// Calls are bounded, not an unbounded retry storm: at most CircuitOpenAfter
+	// failures (+ in-flight) reached the backend before the breaker opened.
+	callsAtOpen := emb.EmbedCalls()
+	if callsAtOpen > cfg.CircuitOpenAfter+cfg.MaxIndexInflight {
+		t.Fatalf("invariant 8 violated: unbounded calls before open (%d)", callsAtOpen)
+	}
+	// Observe a real window with fake time frozen: no further backend calls are
+	// made while the breaker is open, and the scheduler keeps running.
+	time.Sleep(150 * time.Millisecond)
 	select {
 	case <-done:
-		t.Fatal("invariant 8 violated: scheduler exited on backend failure")
+		t.Fatal("invariant 8 violated: scheduler exited/restarted on backend failure")
 	default:
+	}
+	if got := emb.EmbedCalls(); got != callsAtOpen {
+		t.Fatalf("invariant 8 violated: backend calls continued while breaker open (%d -> %d)", callsAtOpen, got)
 	}
 	cancel()
 	select {
