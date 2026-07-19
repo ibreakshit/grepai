@@ -28,6 +28,19 @@ func putArtifactTx(ctx context.Context, tx *sql.Tx, a core.Artifact) error {
 	return err
 }
 
+// putArtifactChunksTx records the ordered (artifact, ordinal, chunk) mapping.
+// Idempotent: re-committing an immutable artifact re-inserts the same rows.
+func putArtifactChunksTx(ctx context.Context, tx *sql.Tx, artifactID core.ArtifactID, chunks []core.ArtifactChunk) error {
+	for _, ch := range chunks {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO artifact_chunks(artifact_id, ordinal, chunk_id)
+			VALUES(?, ?, ?)`, string(artifactID), ch.Ordinal, ch.ChunkID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GetArtifact returns the artifact for an exact (repository, path, source hash,
 // fingerprint) key. A differing fingerprint or source hash never matches.
 func (c *Catalog) GetArtifact(ctx context.Context, key core.ArtifactKey) (core.Artifact, bool, error) {

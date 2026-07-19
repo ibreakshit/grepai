@@ -43,6 +43,9 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 	if err := putArtifactTx(ctx, tx, req.Artifact); err != nil {
 		return err
 	}
+	if err := putArtifactChunksTx(ctx, tx, req.Artifact.ID, req.Chunks); err != nil {
+		return err
+	}
 	// Switch the view only if this generation is at least as new as the one
 	// currently recorded — a superseded (older-generation) commit must not
 	// regress the worktree view (spec §5.6: only the newest generation commits).
@@ -62,6 +65,26 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 		DELETE FROM index_jobs WHERE worktree_id=? AND relative_path=? AND generation<=?`,
 		string(job.WorktreeID), job.Path, int64(req.View.Generation))
 	return err
+}
+
+// CommitDelete atomically removes a worktree's view of a path and deletes the
+// job, guarded so a newer generation (view or job) is never clobbered by a
+// stale delete (spec §5.6). The artifact itself is retained (it may still be
+// referenced by other worktrees; invariant 5).
+func (c *Catalog) CommitDelete(ctx context.Context, wt core.WorktreeID, relPath string, gen core.Generation, job core.Job) error {
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM worktree_files
+			WHERE worktree_id=? AND relative_path=? AND generation<=?`,
+			string(wt), relPath, int64(gen)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			DELETE FROM index_jobs
+			WHERE worktree_id=? AND relative_path=? AND generation<=?`,
+			string(job.WorktreeID), job.Path, int64(gen))
+		return err
+	})
 }
 
 // UpsertJob records desired file state, superseding an existing job for the
