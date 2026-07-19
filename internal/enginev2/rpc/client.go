@@ -90,6 +90,13 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 	if resp.Error != nil {
 		return resp.Error
 	}
+	// Verify the response id matches the request we just sent. With sequential
+	// (mutex-serialized, single-outstanding) calls this is always true; a
+	// mismatch means the stream desynced, which must surface loudly rather than
+	// returning another call's result.
+	if string(resp.ID) != strconv.FormatUint(id, 10) {
+		return fmt.Errorf("rpc: response id %s does not match request id %d (stream desync)", resp.ID, id)
+	}
 	if result != nil && len(resp.Result) > 0 {
 		return json.Unmarshal(resp.Result, result)
 	}
