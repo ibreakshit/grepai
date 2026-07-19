@@ -9,7 +9,11 @@ package legacyimport
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -29,7 +33,7 @@ type CatalogWriter interface {
 	PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error
 	CommitUpdate(ctx context.Context, req core.CommitRequest, job core.Job) error
 	WorktreeViewPaths(ctx context.Context, wt core.WorktreeID) ([]string, error)
-	DeleteWorktreeView(ctx context.Context, wt core.WorktreeID, relPath string) error
+	DeleteWorktreeView(ctx context.Context, wt core.WorktreeID, relPath string, maxGen core.Generation) error
 }
 
 // Stats summarizes an import. Document/placement counts are read back from the
@@ -50,11 +54,18 @@ type Stats struct {
 // mixed imports), prunes views for source files that have disappeared, and reads
 // the committed document set back from the catalog so Stats reflect reality.
 //
-// Chunk identity is content-addressed on the v1 ContentHash — v1's own
-// vector-cache key (LookupByContentHash) — so distinct embeddings never collapse
-// even when display content coincides; identical embeddings dedupe. SourceHash
-// is the v1 Document.Hash, so the import is self-contained (no git, no network).
-// Idempotent: re-running the same index writes the same rows and Stats.
+// Chunk identity is content-addressed on the chunk's vector bytes (vectorIdentity),
+// so distinct embeddings never collapse even when display content coincides;
+// identical embeddings dedupe. SourceHash is the v1 Document.Hash, so the import
+// is self-contained (no git, no network). Idempotent: re-running the same index
+// writes the same rows and Stats.
+//
+// Concurrency: migration assumes exclusive access to its dedicated catalog (it
+// is a manual, single-process CLI, not a live-daemon path). The ownership guard,
+// commits, and prune are separate transactions; should a concurrent writer
+// activate a different generation between them, commits at migrationGeneration
+// would simply not switch the view, and the durable reconcile that follows would
+// report a MISMATCH rather than silently corrupt — a loud failure, not data loss.
 func Import(ctx context.Context, cat CatalogWriter, repo core.RepositoryID, wt core.WorktreeID, root string, idx LegacyIndex, fingerprint string) (Stats, error) {
 	var st Stats
 
@@ -148,7 +159,7 @@ func Import(ctx context.Context, cat CatalogWriter, repo core.RepositoryID, wt c
 	}
 	for _, p := range existing {
 		if _, ok := committed[p]; !ok {
-			if err := cat.DeleteWorktreeView(ctx, wt, p); err != nil {
+			if err := cat.DeleteWorktreeView(ctx, wt, p, migrationGeneration); err != nil {
 				return st, fmt.Errorf("prune stale view (%s): %w", p, err)
 			}
 			st.PrunedStaleViews++
@@ -165,15 +176,28 @@ func Import(ctx context.Context, cat CatalogWriter, repo core.RepositoryID, wt c
 	return st, nil
 }
 
-// vectorIdentity returns the value that uniquely identifies a chunk's embedding.
-// v1 keyed its vector cache on ContentHash (store.LookupByContentHash), so equal
-// ContentHash implies equal embedding input and vector; it falls back to display
-// content only when a legacy chunk carries no ContentHash.
+// vectorIdentity returns a value that uniquely identifies a chunk's embedding,
+// so content-addressing collapses two chunks only when their vectors are truly
+// identical. It hashes the vector's float32 bytes directly — identity is thus a
+// function of the vector alone, independent of ContentHash presence/format, so
+// distinct embeddings can never merge (even when display content coincides).
+// Tagged namespaces ("vec:" / "ch:" / "content:") keep the vector path from
+// colliding with the degenerate fallbacks used only for legacy chunks that carry
+// no vector at all.
 func vectorIdentity(ch LegacyChunk) string {
-	if ch.ContentHash != "" {
-		return ch.ContentHash
+	if len(ch.Vector) > 0 {
+		h := sha256.New()
+		var buf [4]byte
+		for _, f := range ch.Vector {
+			binary.LittleEndian.PutUint32(buf[:], math.Float32bits(f))
+			_, _ = h.Write(buf[:])
+		}
+		return "vec:" + hex.EncodeToString(h.Sum(nil))
 	}
-	return ch.Content
+	if ch.ContentHash != "" {
+		return "ch:" + ch.ContentHash
+	}
+	return "content:" + ch.Content
 }
 
 // Reconcile verifies an import against the source index: every source document

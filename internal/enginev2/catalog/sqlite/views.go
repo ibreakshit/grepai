@@ -151,16 +151,18 @@ func (c *Catalog) CommitDelete(ctx context.Context, wt core.WorktreeID, relPath 
 	})
 }
 
-// DeleteWorktreeView unconditionally removes a single file from a worktree's
-// view. Unlike CommitDelete it is not tied to an index job: it exists for
-// migration, which owns a dedicated catalog and prunes views for source files
-// that no longer exist in the legacy index. The shared immutable artifact is
-// retained (invariant 5); only this worktree's view row is removed.
-func (c *Catalog) DeleteWorktreeView(ctx context.Context, wt core.WorktreeID, relPath string) error {
+// DeleteWorktreeView removes a single file from a worktree's view, but only if
+// the view is at generation maxGen or older. Unlike CommitDelete it is not tied
+// to an index job: it exists for migration, which owns a dedicated catalog and
+// prunes views for source files that no longer exist in the legacy index. The
+// generation bound ensures a stale-view prune can never delete a newer view a
+// concurrent writer just committed. The shared immutable artifact is retained
+// (invariant 5); only this worktree's view row is removed.
+func (c *Catalog) DeleteWorktreeView(ctx context.Context, wt core.WorktreeID, relPath string, maxGen core.Generation) error {
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			DELETE FROM worktree_files WHERE worktree_id=? AND relative_path=?`,
-			string(wt), relPath)
+			DELETE FROM worktree_files WHERE worktree_id=? AND relative_path=? AND generation<=?`,
+			string(wt), relPath, int64(maxGen))
 		return err
 	})
 }
