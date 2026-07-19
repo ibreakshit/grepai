@@ -8,7 +8,7 @@ import (
 
 // schemaVersion is the current catalog schema version. Bump it and append a
 // migration when the schema changes.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migration0001 is the initial schema. Vectors are little-endian float32
 // blobs whose byte length equals dimensions*4 (validated in Go, not SQL).
@@ -110,7 +110,17 @@ CREATE TABLE service_state (
 `
 
 // migrations is the ordered list; index i applies version i+1.
-var migrations = []string{migration0001}
+// migration0002 adds chunk display metadata so search can return code snippets
+// with line numbers: content is content-addressed (stable per chunk_id, in
+// chunks); line ranges are per-artifact (identical content can sit at different
+// lines in different files, so they live in artifact_chunks).
+const migration0002 = `
+ALTER TABLE chunks ADD COLUMN content TEXT NOT NULL DEFAULT '';
+ALTER TABLE artifact_chunks ADD COLUMN start_line INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE artifact_chunks ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0;
+`
+
+var migrations = []string{migration0001, migration0002}
 
 // schemaVersion (method) returns the highest applied migration version, or 0.
 func (c *Catalog) schemaVersion(ctx context.Context) (int, error) {

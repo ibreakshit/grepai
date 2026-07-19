@@ -7,12 +7,16 @@ import (
 )
 
 // ArtifactChunk is one ordered chunk of an artifact: its content-addressed
-// identity plus the validated embedding vector. Ordinal preserves chunk order
-// within the artifact so retrieval is stable.
+// identity, the validated embedding vector, and display metadata (the chunk's
+// text and its line range within this artifact) for search snippets. Ordinal
+// preserves chunk order within the artifact so retrieval is stable.
 type ArtifactChunk struct {
-	Ordinal int
-	ChunkID string
-	Vector  []float32
+	Ordinal   int
+	ChunkID   string
+	Vector    []float32
+	Content   string // display text (content-addressed, stable per ChunkID)
+	StartLine int    // 1-based first line within the file (per-artifact)
+	EndLine   int    // 1-based last line within the file (per-artifact)
 }
 
 // ChunkID derives a content-addressed identifier for one chunk's embedding

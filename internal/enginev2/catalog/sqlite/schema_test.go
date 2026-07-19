@@ -34,6 +34,19 @@ func TestMigrateAppliesSchemaOnce(t *testing.T) {
 			t.Fatalf("table %q missing: %v", tbl, err)
 		}
 	}
+	// migration0002 columns exist (chunk display metadata).
+	for _, col := range []struct{ table, column string }{
+		{"chunks", "content"}, {"artifact_chunks", "start_line"}, {"artifact_chunks", "end_line"},
+	} {
+		var found int
+		if err := c.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?", col.table, col.column).Scan(&found); err != nil {
+			t.Fatalf("pragma %s.%s: %v", col.table, col.column, err)
+		}
+		if found != 1 {
+			t.Fatalf("column %s.%s missing after migration0002", col.table, col.column)
+		}
+	}
 	c.Close()
 
 	// Reopening applies no new migration and keeps the version.
