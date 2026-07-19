@@ -56,8 +56,8 @@ type stubBuilder struct {
 	err error
 }
 
-func (b stubBuilder) Build(_ context.Context, _ artifacts.BuildRequest) (core.Artifact, error) {
-	return b.art, b.err
+func (b stubBuilder) Build(_ context.Context, _ artifacts.BuildRequest) (core.Artifact, bool, error) {
+	return b.art, b.err != nil, b.err // report contact when it produced an error (e.g. embed failure)
 }
 
 func realBuilder(emb *enginetest.FakeEmbedder, c *sqlite.Catalog) worker.Builder {
@@ -75,7 +75,7 @@ func TestProcessClaimedClassifies(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim: %v", err)
 	}
-	oc, cause := w.ProcessClaimed(ctx, job)
+	oc, _, cause := w.ProcessClaimed(ctx, job)
 	if oc != worker.OutcomeCommitted || cause != nil {
 		t.Fatalf("want committed, got oc=%d cause=%v", oc, cause)
 	}
@@ -94,7 +94,7 @@ func TestProcessClaimedPermanentClassification(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim: %v", err)
 	}
-	oc, cause := w.ProcessClaimed(ctx, job)
+	oc, _, cause := w.ProcessClaimed(ctx, job)
 	if oc != worker.OutcomePermanent || cause == nil {
 		t.Fatalf("want permanent+cause, got oc=%d cause=%v", oc, cause)
 	}

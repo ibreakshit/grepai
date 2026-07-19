@@ -33,9 +33,12 @@ func TestBuildEmbedsMissesOnlyAndReusesCache(t *testing.T) {
 
 	// First build: cold cache => embeds, artifact carries chunks.
 	b1 := artifacts.New(ch, emb, mapCache{m: map[string][]float32{}})
-	art, err := b1.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
+	art, contacted, err := b1.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !contacted {
+		t.Fatal("cold build must report backend contact")
 	}
 	if len(art.Chunks) == 0 {
 		t.Fatal("expected chunks")
@@ -54,9 +57,12 @@ func TestBuildEmbedsMissesOnlyAndReusesCache(t *testing.T) {
 	}
 	emb2 := enginetest.NewFakeEmbedder(4)
 	b2 := artifacts.New(ch, emb2, mapCache{m: warm})
-	art2, err := b2.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
+	art2, contacted2, err := b2.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if contacted2 {
+		t.Fatal("fully cache-served build must report no backend contact")
 	}
 	if emb2.TextsEmbedded() != 0 {
 		t.Fatalf("warm build must not embed, embedded=%d", emb2.TextsEmbedded())
@@ -76,7 +82,10 @@ func TestBuildRejectsCachedDimensionMismatch(t *testing.T) {
 	// Cache holds a wrong-dimension vector (3 != 4) for that chunk id.
 	cache := mapCache{m: map[string][]float32{id: {1, 2, 3}}}
 	b := artifacts.New(ch, emb, cache)
-	_, err := b.Build(ctx, artifacts.BuildRequest{Key: core.ArtifactKey{RepositoryID: "r", RelativePath: "a.go", SourceHash: "h1", Fingerprint: "fp"}, Content: []byte("x")})
+	_, contacted, err := b.Build(ctx, artifacts.BuildRequest{Key: core.ArtifactKey{RepositoryID: "r", RelativePath: "a.go", SourceHash: "h1", Fingerprint: "fp"}, Content: []byte("x")})
+	if contacted {
+		t.Fatal("a cached-vector mismatch reaches no backend")
+	}
 	if err != artifacts.ErrDimensionMismatch {
 		t.Fatalf("want ErrDimensionMismatch, got %v", err)
 	}
@@ -88,7 +97,8 @@ func TestBuildEmptyContentIsValidEmptyArtifact(t *testing.T) {
 	ch := indexer.NewChunker(512, 50)
 	key := core.ArtifactKey{RepositoryID: "r", RelativePath: "empty.go", SourceHash: "h0", Fingerprint: "fp"}
 	b := artifacts.New(ch, emb, mapCache{m: map[string][]float32{}})
-	art, err := b.Build(ctx, artifacts.BuildRequest{Key: key, Content: []byte("")})
+	art, contacted, err := b.Build(ctx, artifacts.BuildRequest{Key: key, Content: []byte("")})
+	_ = contacted
 	if err != nil {
 		t.Fatal(err)
 	}

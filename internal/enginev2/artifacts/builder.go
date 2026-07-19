@@ -19,9 +19,12 @@ type BuildRequest struct {
 
 // ArtifactBuilder transforms content, reuses compatible cached chunk vectors,
 // embeds only cache misses, validates returned dimensions, and returns the
-// immutable artifact ready for an atomic catalog commit.
+// immutable artifact ready for an atomic catalog commit. The bool return
+// reports whether the embedding backend was actually contacted (an EmbedBatch
+// call was made) — the scheduler's circuit breaker only reacts to real endpoint
+// signals, so a fully cache-served build reports false.
 type ArtifactBuilder interface {
-	Build(ctx context.Context, req BuildRequest) (core.Artifact, error)
+	Build(ctx context.Context, req BuildRequest) (core.Artifact, bool, error)
 }
 
 // ErrDimensionMismatch signals an embedding (or cached vector) whose length
@@ -55,14 +58,16 @@ func New(ch Chunker, emb embedder.Embedder, cache ChunkCache) *DefaultBuilder {
 var _ ArtifactBuilder = (*DefaultBuilder)(nil)
 
 // Build transforms content into an immutable artifact, reusing compatible
-// cached chunk vectors and embedding only the misses (spec §5.5).
-func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Artifact, error) {
+// cached chunk vectors and embedding only the misses (spec §5.5). The second
+// return reports whether the embedding backend was contacted (an EmbedBatch
+// call was attempted, success or failure).
+func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Artifact, bool, error) {
 	dims := b.emb.Dimensions()
 	art := core.Artifact{ID: req.Key.ArtifactID(), Key: req.Key, Dimensions: dims}
 
 	infos := b.chunker.Chunk(req.Key.RelativePath, string(req.Content))
 	if len(infos) == 0 {
-		return art, nil // valid empty artifact
+		return art, false, nil // valid empty artifact; no backend contact
 	}
 
 	art.Chunks = make([]core.ArtifactChunk, len(infos))
@@ -77,11 +82,11 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 		idByOrd[i] = id
 		vec, ok, err := b.cache.GetChunkVector(ctx, id)
 		if err != nil {
-			return core.Artifact{}, err
+			return core.Artifact{}, false, err
 		}
 		if ok {
 			if len(vec) != dims {
-				return core.Artifact{}, ErrDimensionMismatch
+				return core.Artifact{}, false, ErrDimensionMismatch
 			}
 			art.Chunks[i] = core.ArtifactChunk{Ordinal: i, ChunkID: id, Vector: vec}
 			continue
@@ -93,24 +98,28 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 		missOrds = append(missOrds, i)
 	}
 
-	if len(missText) > 0 {
-		vecs, err := b.emb.EmbedBatch(ctx, missText)
-		if err != nil {
-			return core.Artifact{}, err // worker classifies transient/permanent
-		}
-		if len(vecs) != len(missText) {
-			return core.Artifact{}, ErrDimensionMismatch
-		}
-		for _, v := range vecs {
-			if len(v) != dims {
-				return core.Artifact{}, ErrDimensionMismatch
-			}
-		}
-		for _, ord := range missOrds {
-			id := idByOrd[ord]
-			vec := vecs[missByID[id]]
-			art.Chunks[ord] = core.ArtifactChunk{Ordinal: ord, ChunkID: id, Vector: vec}
+	if len(missText) == 0 {
+		return art, false, nil // fully cache-served; no backend contact
+	}
+
+	// From here the embedding backend is contacted (contacted=true), whether
+	// the call succeeds or fails.
+	vecs, err := b.emb.EmbedBatch(ctx, missText)
+	if err != nil {
+		return core.Artifact{}, true, err // worker classifies transient/permanent
+	}
+	if len(vecs) != len(missText) {
+		return core.Artifact{}, true, ErrDimensionMismatch
+	}
+	for _, v := range vecs {
+		if len(v) != dims {
+			return core.Artifact{}, true, ErrDimensionMismatch
 		}
 	}
-	return art, nil
+	for _, ord := range missOrds {
+		id := idByOrd[ord]
+		vec := vecs[missByID[id]]
+		art.Chunks[ord] = core.ArtifactChunk{Ordinal: ord, ChunkID: id, Vector: vec}
+	}
+	return art, true, nil
 }

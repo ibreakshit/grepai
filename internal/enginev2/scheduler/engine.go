@@ -27,8 +27,10 @@ type Queue interface {
 }
 
 // Processor processes one already-claimed job (satisfied by *worker.Worker).
+// The bool reports whether the embedding backend was contacted, so the circuit
+// breaker reacts only to real endpoint outcomes.
 type Processor interface {
-	ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, error)
+	ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, bool, error)
 }
 
 // Engine is the single host-wide admission-control and pacing layer over the
@@ -147,51 +149,77 @@ func (e *Engine) dispatch(ctx context.Context, job core.Job, release func(), adm
 	e.addInFlight(1)
 	defer e.addInFlight(-1)
 
-	oc, cause := e.p.ProcessClaimed(ctx, job)
-	e.account(ctx, job, oc, cause, adm)
+	oc, contacted, cause := e.p.ProcessClaimed(ctx, job)
+	e.account(ctx, job, oc, contacted, cause, adm)
 }
 
-// account applies the outcome: it resolves the breaker admission exactly once,
-// schedules retry-with-backoff, and dead-letters after bounded attempts. Retry
-// state is keyed by the full intent identity (jobKey) so a superseding re-save
-// neither inherits nor erases another intent's attempt count.
-func (e *Engine) account(ctx context.Context, job core.Job, oc worker.Outcome, cause error, adm admission) {
+// account resolves the breaker admission exactly once and disposes of the job.
+// The breaker reacts ONLY to a real endpoint signal: a call that never reached
+// the backend (superseded, delete, fully cache-served, or a pre-build catalog
+// error) resolves as an abort so it can neither trip nor falsely recover the
+// circuit — in particular a half-open probe that made no endpoint call cannot
+// close the breaker. Retry state is keyed by full intent identity (jobKey) so a
+// superseding re-save neither inherits nor erases another intent's attempts.
+func (e *Engine) account(ctx context.Context, job core.Job, oc worker.Outcome, contacted bool, cause error, adm admission) {
+	switch {
+	case !contacted:
+		e.breaker.record(adm, resultAbort)
+	case oc == worker.OutcomeTransient:
+		e.breaker.record(adm, resultFailure)
+	default: // committed / superseded / permanent that actually reached the endpoint
+		e.breaker.record(adm, resultSuccess)
+	}
+
 	key := jobKey(job)
 	switch oc {
 	case worker.OutcomeCommitted, worker.OutcomeSuperseded:
-		e.breaker.record(adm, resultSuccess)
 		e.clearAttempts(key)
 	case worker.OutcomePermanent:
-		// A definitive answer proves the endpoint is reachable (not an
-		// availability failure): resolve the admission as success.
-		e.breaker.record(adm, resultSuccess)
-		if err := e.q.DeadLetterJob(ctx, job, "permanent: "+errMsg(cause)); err != nil {
-			// The terminal write failed (durable-store I/O): the job is still
-			// claimed. Re-attempt the terminal transition later instead of
-			// leaving it silently stuck; keep the attempt state.
-			e.scheduleRetry(ctx, job, 1)
-			return
-		}
-		e.clearAttempts(key)
+		e.terminate(ctx, job, key, "permanent: "+errMsg(cause))
 	case worker.OutcomeTransient:
-		e.breaker.record(adm, resultFailure)
 		n := e.incAttempts(key)
 		if n >= e.cfg.MaxJobAttempts {
-			if err := e.q.DeadLetterJob(ctx, job, "attempts exhausted: "+errMsg(cause)); err != nil {
-				// Terminal write failed: re-attempt later, keep the attempt state.
-				e.scheduleRetry(ctx, job, n)
-				return
-			}
-			e.clearAttempts(key)
+			e.terminate(ctx, job, key, "attempts exhausted: "+errMsg(cause))
 			return
 		}
 		e.scheduleRetry(ctx, job, n)
 	default:
-		// Unclassified (injected crash): resolve the admission as an abort so a
-		// probe never wedges, and leave the job claimed for a restart's
-		// worker.Recover to requeue.
-		e.breaker.record(adm, resultAbort)
+		// Unclassified (injected crash): the admission was already aborted
+		// above; leave the job claimed for a restart's worker.Recover.
 	}
+}
+
+// terminate dead-letters a job, retrying ONLY the terminal write (not the whole
+// job) with growing capped backoff if the durable store errors — so a job is
+// never silently left claimed, the original reason is preserved, and a broken
+// store cannot spin. clearAttempts happens only after the write succeeds.
+func (e *Engine) terminate(ctx context.Context, job core.Job, key, reason string) {
+	if err := e.q.DeadLetterJob(ctx, job, reason); err != nil {
+		e.scheduleTerminate(ctx, job, reason, 1)
+		return
+	}
+	e.clearAttempts(key)
+}
+
+func (e *Engine) scheduleTerminate(ctx context.Context, job core.Job, reason string, attempt int) {
+	delay := fullJitterDelay(attempt, e.cfg, e.unit())
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.clock.After(delay):
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if err := e.q.DeadLetterJob(ctx, job, reason); err != nil {
+			e.scheduleTerminate(ctx, job, reason, attempt+1) // grow backoff (rate bounded)
+			return
+		}
+		e.clearAttempts(jobKey(job))
+	}()
 }
 
 // scheduleRetry re-dispatches a transiently-failed job after a full-jitter

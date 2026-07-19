@@ -68,7 +68,7 @@ type gatingProcessor struct {
 	cur, peak, calls int
 }
 
-func (g *gatingProcessor) ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, error) {
+func (g *gatingProcessor) ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, bool, error) {
 	g.mu.Lock()
 	g.cur++
 	g.calls++
@@ -80,11 +80,11 @@ func (g *gatingProcessor) ProcessClaimed(ctx context.Context, job core.Job) (wor
 		g.entered <- struct{}{}
 		<-g.release
 	}
-	oc, err := g.inner.ProcessClaimed(ctx, job)
+	oc, contacted, err := g.inner.ProcessClaimed(ctx, job)
 	g.mu.Lock()
 	g.cur--
 	g.mu.Unlock()
-	return oc, err
+	return oc, contacted, err
 }
 
 func (g *gatingProcessor) peakConcurrency() int {
@@ -100,7 +100,7 @@ type countingProcessor struct {
 	calls int
 }
 
-func (c *countingProcessor) ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, error) {
+func (c *countingProcessor) ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, bool, error) {
 	c.mu.Lock()
 	c.calls++
 	c.mu.Unlock()

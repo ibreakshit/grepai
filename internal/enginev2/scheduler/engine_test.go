@@ -48,11 +48,30 @@ func (q *fakeQueue) UpsertJob(_ context.Context, job core.Job) error {
 }
 func (q *fakeQueue) DeadLetterJob(context.Context, core.Job, string) error { return nil }
 
-// fakeProcessor always commits.
+// fakeProcessor always commits (with backend contact).
 type fakeProcessor struct{}
 
-func (fakeProcessor) ProcessClaimed(context.Context, core.Job) (worker.Outcome, error) {
-	return worker.OutcomeCommitted, nil
+func (fakeProcessor) ProcessClaimed(context.Context, core.Job) (worker.Outcome, bool, error) {
+	return worker.OutcomeCommitted, true, nil
+}
+
+// countProc counts ProcessClaimed invocations (to prove terminal retry does not
+// reprocess the job).
+type countProc struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countProc) ProcessClaimed(context.Context, core.Job) (worker.Outcome, bool, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return worker.OutcomePermanent, true, errors.New("bad dims")
+}
+func (c *countProc) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
 }
 
 func mustEngine(t *testing.T, cfg Config) *Engine {
@@ -172,21 +191,24 @@ func TestJobKeyDistinguishesIntent(t *testing.T) {
 	}
 }
 
-// faultQueue fails the first dlErrs DeadLetterJob calls, then succeeds.
+// faultQueue fails the first dlErrs DeadLetterJob calls, then succeeds, and
+// records the reasons it was given.
 type faultQueue struct {
 	fakeQueue
 	mu      sync.Mutex
 	dlErrs  int
 	dlCalls int
+	reasons []string
 }
 
 func (q *faultQueue) ClaimNextJobInRepo(_ context.Context, repo core.RepositoryID, _ core.Priority) (core.Job, bool, error) {
 	return core.Job{}, false, nil
 }
-func (q *faultQueue) DeadLetterJob(context.Context, core.Job, string) error {
+func (q *faultQueue) DeadLetterJob(_ context.Context, _ core.Job, reason string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.dlCalls++
+	q.reasons = append(q.reasons, reason)
 	if q.dlCalls <= q.dlErrs {
 		return errors.New("durable-store i/o")
 	}
@@ -197,36 +219,97 @@ func (q *faultQueue) calls() int {
 	defer q.mu.Unlock()
 	return q.dlCalls
 }
-
-// permanentProcessor always returns a permanent outcome.
-type permanentProcessor struct{}
-
-func (permanentProcessor) ProcessClaimed(context.Context, core.Job) (worker.Outcome, error) {
-	return worker.OutcomePermanent, errors.New("bad dims")
+func (q *faultQueue) allReasons(want string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, r := range q.reasons {
+		if r != want {
+			return false
+		}
+	}
+	return len(q.reasons) > 0
 }
 
-// A terminal DeadLetterJob write failure must not silently abandon the job; the
-// terminal transition is re-attempted (Codex review Important #4).
+// A terminal DeadLetterJob write failure must not silently abandon the job: the
+// terminal transition is re-attempted (Codex Important #4), retrying ONLY the
+// write (no full reprocess) and preserving the original reason (Codex re-review).
 func TestAccountRetriesTerminalWriteFailure(t *testing.T) {
 	ctx := context.Background()
 	q := &faultQueue{dlErrs: 1}
+	cp := &countProc{}
 	clk := enginetest.NewFakeClock(time.Unix(0, 0))
-	e, err := New(DefaultConfig(), q, permanentProcessor{}, clk, 1)
+	e, err := New(DefaultConfig(), q, cp, clk, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, DesiredHash: "h1", Operation: core.OpUpsert}
-	// First terminal write fails; account must schedule a re-attempt.
-	e.account(ctx, job, worker.OutcomePermanent, errors.New("bad dims"), admission{ok: true})
+	const reason = "permanent: bad dims"
+	e.account(ctx, job, worker.OutcomePermanent, true, errors.New("bad dims"), admission{ok: true})
 	if q.calls() != 1 {
 		t.Fatalf("expected one failed dead-letter attempt, got %d", q.calls())
 	}
-	// Fire the retry backoff (advance repeatedly so the timer fires whenever the
-	// retry goroutine registers it); the re-attempt succeeds.
 	pollUntil(t, 3*time.Second, func() bool {
 		clk.Advance(DefaultConfig().MaxRetryDelay)
 		return q.calls() >= 2
 	})
+	if cp.count() != 0 {
+		t.Fatalf("terminal retry must not reprocess the job (%d ProcessClaimed calls)", cp.count())
+	}
+	if !q.allReasons(reason) {
+		t.Fatal("terminal retry must preserve the original dead-letter reason")
+	}
+}
+
+// A half-open probe that made no endpoint call (superseded/delete/cache-served)
+// must NOT close the breaker (Codex re-review Important #1).
+func TestAccountProbeWithoutContactDoesNotClose(t *testing.T) {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.CircuitOpenAfter = 2
+	clk := enginetest.NewFakeClock(time.Unix(0, 0))
+	e, err := New(cfg, &fakeQueue{}, fakeProcessor{}, clk, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open the breaker directly (avoid spawning retry goroutines).
+	for i := 0; i < cfg.CircuitOpenAfter; i++ {
+		e.breaker.record(e.breaker.Allow(), resultFailure)
+	}
+	if e.breaker.State() != "open" {
+		t.Fatalf("expected open, got %s", e.breaker.State())
+	}
+	clk.Advance(cfg.CircuitProbeInterval)
+	probe := e.breaker.Allow()
+	if !probe.probe {
+		t.Fatal("expected a half-open probe token")
+	}
+	job := core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, DesiredHash: "h1", Operation: core.OpUpsert}
+	e.account(ctx, job, worker.OutcomeSuperseded, false /*contacted*/, nil, probe)
+	if e.breaker.State() == "closed" {
+		t.Fatal("a probe with no endpoint contact must not close the breaker")
+	}
+}
+
+// A half-open probe that really reached the endpoint successfully closes it.
+func TestAccountProbeWithContactCloses(t *testing.T) {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.CircuitOpenAfter = 2
+	clk := enginetest.NewFakeClock(time.Unix(0, 0))
+	e, err := New(cfg, &fakeQueue{}, fakeProcessor{}, clk, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < cfg.CircuitOpenAfter; i++ {
+		e.breaker.record(e.breaker.Allow(), resultFailure)
+	}
+	clk.Advance(cfg.CircuitProbeInterval)
+	probe := e.breaker.Allow()
+	job := core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, DesiredHash: "h1", Operation: core.OpUpsert}
+	e.account(ctx, job, worker.OutcomeCommitted, true /*contacted*/, nil, probe)
+	if e.breaker.State() != "closed" {
+		t.Fatalf("a real endpoint success on the probe must close: %s", e.breaker.State())
+	}
 }
 
 // A repository must not be starved by others being inserted/removed from the
