@@ -131,7 +131,7 @@ The daemon uses **one host-global embedder + indexing fingerprint** derived from
 
 **Server (`server.go`):** dispatch target is `service.Service`. `Serve(l net.Listener, h service.Service)` accepts connections, one goroutine per connection. Per connection: read `Content-Length: N\r\n\r\n<N bytes>` frames (LSP-style), decode `rpc.Request`, dispatch by `Method` to the matching call, encode + write framed `rpc.Response`. Sequential per connection (per-repo WAL catalogs + read-only query methods make concurrent connections safe). A dispatch table maps each `Method*` constant to a params-decode + service call; `id` is echoed verbatim; a no-`id` notification gets no response. Errors → JSON-RPC codes: `-32700` parse, `-32600` invalid request, `-32601` method not found, `-32602` invalid params, `-32603` internal (service error wrapped; `Data` = error string). A per-request panic is recovered into `-32603`, never killing the connection/process.
 
-**Client (`client.go`):** `Dial(socketPath)` distinguishes daemon-down (ENOENT/ECONNREFUSED) from other errors (drives lazy-start + v1 fallback). `Call(ctx, method, params, *result)` uses monotonic ids, framed write/read, id-matching, maps `rpc.Error` back to a typed Go error (code preserved), respects `ctx` deadline. Thin typed per-method wrappers return the `service` response structs so CLI code is transport-agnostic. `ensureDaemon` (§4.2) wraps `Dial`.
+**Client (`client.go`):** `Dial(socketPath)` distinguishes daemon-down (ENOENT/ECONNREFUSED) from other errors (drives lazy-start). `Call(ctx, method, params, *result)` uses monotonic ids, framed write/read, id-matching, maps `rpc.Error` back to a typed Go error (code preserved), respects `ctx` deadline. Thin typed per-method wrappers return the `service` response structs so CLI code is transport-agnostic. `ensureDaemon` (§4.2) wraps `Dial`.
 
 ### 4.6 Catalog schema guard (light)
 
@@ -142,7 +142,8 @@ Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for th
 - **Config:** add `Engine string` (`"v1"` default | `"v2"`) and an optional per-repo `Daemon.Socket` override to `config.Config`. Absent = `v1`; loading an old config is unchanged. (Global daemon settings live in `daemon.json`, not here.)
 - **`grepai daemon` (new):** `start` (spawn detached `grepaid`, wait for socket), `stop` (SIGTERM the pid from the lock/pidfile), `status` (dial → health + registered-repo count from the registry).
 - **`grepai v2 search|status|watch`:** `ensureDaemon` then RPC. `v2 watch` = ensure-registered (register + open catalog) + reconcile + tail status. `v2 search`/`v2 status` resolve worktree id from cwd (canonical root). Daemon unreachable after a spawn attempt = a clear error (explicit v2 surface — no silent v1 fallback).
-- **Top-level `grepai watch|search|status`:** when `engine: v2`, `ensureDaemon` + daemon path (watch degrades to ensure-registered + reconcile + status-tail **with a deprecation notice**); if the daemon can't be reached/started, **fall back to v1**. When `engine: v1` (default), behavior is exactly as today. `grepai init` gains, under `engine: v2`, a best-effort ensure-registered step.
+- **Top-level `grepai watch|search|status`:** the `engine` field selects the active engine. `engine: v1` (default/unset) keeps today's behavior exactly. `engine: v2` makes **v1 inert** for that repo and routes the command through `ensureDaemon` + the daemon (watch degrades to ensure-registered + reconcile + status-tail **with a deprecation notice**). There is **no silent v1 fallback**: if the daemon cannot be started, or the v2 path errors, the command **fails loudly** — a broken v2 must complain (on v1 or v2), never silently serve stale/inert v1 results. `grepai init` gains, under `engine: v2`, a best-effort ensure-registered step.
+- **Coexistence is allowed, not prevented.** A repo may have both a v1 index and a v2 catalog, or run a v1 `grepai watch` while registered with the v2 daemon; that is redundant, the operator's concern, and never corrupting (separate files, separate processes). The `engine` field is what keeps a repo in one lane — dropping `engine: v2` on a v1 repo makes v1 inert.
 - Worktree identity resolves from cwd's canonical root; ambiguous/missing identity is an error, never a fallback to another worktree's index.
 
 ## 6. Error handling summary
@@ -150,7 +151,8 @@ Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for th
 | Layer | Failure | Behavior |
 |-------|---------|----------|
 | Client ensureDaemon | socket down | spawn detached grepaid, poll socket to deadline |
-| Client ensureDaemon | spawn didn't come up | clear error pointing at the log (or v1 fallback for top-level engine:v2) |
+| Client ensureDaemon | spawn didn't come up | loud error pointing at the log; **no v1 fallback** (v1 is inert under engine:v2) |
+| v2 path errors (embedder/backend down) | surface loudly to the caller; never silently serve v1 |
 | Daemon start | flock held (lazy-start race loser) | exit 0 quietly; winner owns the socket |
 | Daemon start | stale socket (crash) | unlink (lock owned) then listen |
 | Daemon start | registered repo dir gone / fingerprint mismatch / schema too new | log + skip (or fresh generation), never wedge |
@@ -165,7 +167,7 @@ Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for th
 - **registry unit:** round-trip load/save; atomic temp+rename; append/update; corrupt/missing handling.
 - **rpc unit:** frame round-trip; partial reads and multiple frames in one buffer; each error code; id-correlation across interleaved ids; no-id notification → no response; panic-in-handler recovered.
 - **daemon integration:** real socket + two tmp git fixtures. Register both; reconcile; `waitFresh(deadline)`; `search` in each returns that repo's hit and **not** the other's (isolation guardrail); `status` fresh; `DeadLetterCount` aggregates. **Lazy-start:** with no daemon, an `ensureDaemon` call spawns one and connects; two concurrent `ensureDaemon` calls yield exactly one live daemon (flock race); killing the daemon and calling again respawns it with no orphaned lock/socket. SIGTERM drains, exits 0, registry persisted. A repo whose catalog carries a mismatched fingerprint rolls to a fresh generation and reindexes (transiently empty, then fresh hits — §4.3); a catalog stamped with a newer schema version is skipped with a log while the daemon serves the rest.
-- **cli:** `engine:v1` unchanged (asserts no daemon dial); `engine:v2` with spawn-failure falls back to v1 (top-level); `grepai daemon status` against a running fixture.
+- **cli:** `engine:v1` unchanged (asserts no daemon dial); `engine:v2` with spawn-failure returns a loud error (no v1 fallback); `grepai daemon status` against a running fixture.
 - **gates per phase:** `make build`, `make lint`, `go test ./... -race`, `go vet`, `gofmt` green. Independent `codex-bg` review before advancing.
 
 ## 8. Sequenced phases (one spec)
@@ -173,7 +175,7 @@ Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for th
 - **Phase 0 — Multi-repo substrate:** `catalogset` (four-interface union — §4.4 — incl. the worktree→repo routing map) + per-repo builder router + `registry` + exported schema-version accessor + guard + tests. Isolated. Gate 0.
 - **Phase A — RPC transport:** `rpc/server.go` + `rpc/client.go` (+ `Dial` daemon-down detection) + tests. Isolated. Gate A.
 - **Phase B — Daemon process + lazy-start:** `cmd/grepaid/main.go` (paths, `daemon.json`, flock singleton + race handling, listen, load registry + open catalogs, wire embedder/scheduler/service, background scheduler, graceful shutdown) + `ensureDaemon` spawn helper + integration test. Gate B.
-- **Phase C — CLI clients:** config `Engine`/`Daemon.Socket` + `grepai daemon start|stop|status` + `v2 search/status/watch` via `ensureDaemon` + gated top-level fallback + `init` ensure-registered. Gate C.
+- **Phase C — CLI clients:** config `Engine`/`Daemon.Socket` + `grepai daemon start|stop|status` + `v2 search/status/watch` via `ensureDaemon` + `engine:v2`-gated top-level (v1 inert, loud on failure, no silent fallback) + `init` ensure-registered. Gate C.
 - **Phase D — Binary + docs:** `Makefile` target for the `grepaid` binary + operational docs (lazy-start model, `daemon.json`, state-dir layout, today-vs-daemon migration, the interim watcher gap). **No systemd unit.** Gate D.
 
 ## 9. Non-goals (explicitly out of this slice)
@@ -181,7 +183,7 @@ Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for th
 - **systemd/service-manager packaging** — replaced by lazy-start. (Could be added later for headless/boot-time indexing, but not needed for the interactive model.)
 - Per-repo heterogeneous embedders/fingerprints (host-global embedder this slice; substrate does not preclude it — §4.3).
 - Cross-repo / workspace search (query-time fan-out over member catalogs) — the `catalogset` makes it a merge step, but it is deferred.
-- Repointing top-level `grepai search`/`watch`/`status` *unconditionally* (gated behind `engine: v2` with v1 fallback; default-`engine: v2` cutover is later).
+- Repointing top-level `grepai search`/`watch`/`status` *unconditionally* (gated behind `engine: v2`, which makes v1 inert for that repo; a machine-wide default-`engine: v2` cutover is later).
 - Symbol/Trace population, RPG refresh, fsnotify watcher wiring, generation-scoped controlled rebuild (remain deferred stubs). **Consequence:** freshness is reconcile-on-command, not live fs-event-driven, in this slice.
 - Full catalog migration framework + pre-migration backups (only the refuse-on-newer schema guard lands now — §4.6).
 - Idle auto-exit of the daemon; lazy-open/idle-close of catalog handles (open-all-on-start; add an LRU later if repo count grows large).
