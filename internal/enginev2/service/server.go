@@ -133,6 +133,10 @@ func (s *Server) WaitFresh(ctx context.Context, req WaitFreshRequest) (WaitFresh
 	for {
 		pending, err := s.cat.WorktreePathsPending(ctx, req.WorktreeID, req.Paths)
 		if err != nil {
+			// A deadline/cancel that lands mid-check is a timeout, not a failure.
+			if ctx.Err() != nil {
+				return WaitFreshResponse{Fresh: false}, nil
+			}
 			return WaitFreshResponse{}, err
 		}
 		if !pending {
