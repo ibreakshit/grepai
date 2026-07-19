@@ -17,7 +17,7 @@ import (
 // vector whose length differs from the query's is skipped as incompatible.
 func (c *Catalog) SearchWorktree(ctx context.Context, wt core.WorktreeID, query []float32, limit int) ([]core.SearchHit, error) {
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT wf.relative_path, ch.dimensions, ch.vector
+		SELECT wf.relative_path, ch.dimensions, ch.vector, ch.content, ac.start_line, ac.end_line
 		FROM worktree_files wf
 		JOIN artifact_chunks ac ON ac.artifact_id = wf.artifact_id
 		JOIN chunks ch ON ch.chunk_id = ac.chunk_id
@@ -27,12 +27,14 @@ func (c *Catalog) SearchWorktree(ctx context.Context, wt core.WorktreeID, query 
 	}
 	defer rows.Close()
 
-	best := map[string]float32{}
+	best := map[string]core.SearchHit{}
 	for rows.Next() {
 		var path string
 		var dims int
 		var blob []byte
-		if err := rows.Scan(&path, &dims, &blob); err != nil {
+		var content string
+		var startLine, endLine int
+		if err := rows.Scan(&path, &dims, &blob, &content, &startLine, &endLine); err != nil {
 			return nil, err
 		}
 		if dims != len(query) {
@@ -48,8 +50,9 @@ func (c *Catalog) SearchWorktree(ctx context.Context, wt core.WorktreeID, query 
 		if math.IsNaN(float64(s)) || math.IsInf(float64(s), 0) {
 			continue
 		}
-		if cur, ok := best[path]; !ok || s > cur {
-			best[path] = s
+		// Keep the best-scoring chunk per path, carrying its snippet.
+		if cur, ok := best[path]; !ok || s > cur.Score {
+			best[path] = core.SearchHit{Path: path, Score: s, Content: content, StartLine: startLine, EndLine: endLine}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -57,8 +60,8 @@ func (c *Catalog) SearchWorktree(ctx context.Context, wt core.WorktreeID, query 
 	}
 
 	hits := make([]core.SearchHit, 0, len(best))
-	for p, s := range best {
-		hits = append(hits, core.SearchHit{Path: p, Score: s})
+	for _, h := range best {
+		hits = append(hits, h)
 	}
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].Score != hits[j].Score {

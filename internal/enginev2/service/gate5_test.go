@@ -135,7 +135,7 @@ func TestGate5_ActiveGenerationQueryableDuringRebuild(t *testing.T) {
 	// committing any active view row for it.
 	newVec, _ := emb.Embed(ctx, "brandnew")
 	newCh := core.ChunkID("fp", "brandnew")
-	if err := c.PutChunkVector(ctx, newCh, "r", "fp", newVec); err != nil {
+	if err := c.PutChunkVector(ctx, newCh, "r", "fp", newVec, "brandnew"); err != nil {
 		t.Fatal(err)
 	}
 	newKey := core.ArtifactKey{RepositoryID: "r", RelativePath: "new.go", SourceHash: "hnew", Fingerprint: "fp"}

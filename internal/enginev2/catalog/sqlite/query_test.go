@@ -20,7 +20,7 @@ func putArtifact(t *testing.T, c *Catalog, emb *enginetest.FakeEmbedder, wt core
 	}
 	key := core.ArtifactKey{RepositoryID: "r", RelativePath: path, SourceHash: path + content, Fingerprint: "fp"}
 	chID := core.ChunkID("fp", content)
-	must(t, c.PutChunkVector(ctx, chID, "r", "fp", vec))
+	must(t, c.PutChunkVector(ctx, chID, "r", "fp", vec, content))
 	art := core.Artifact{ID: key.ArtifactID(), Key: key, Dimensions: 4, Chunks: []core.ArtifactChunk{{Ordinal: 0, ChunkID: chID, Vector: vec}}}
 	req := core.CommitRequest{
 		View:     core.ViewEntry{WorktreeID: wt, Path: path, ArtifactID: key.ArtifactID(), Generation: 1},
@@ -52,6 +52,9 @@ func TestSearchWorktreeIsolationAndRanking(t *testing.T) {
 	if len(hits) != 1 || hits[0].Path != "a.go" {
 		t.Fatalf("w1 search wrong: %+v", hits)
 	}
+	if hits[0].Content != "alpha" {
+		t.Fatalf("search must return the matching chunk's content, got %q", hits[0].Content)
+	}
 	for _, h := range hits {
 		if h.Path == "secret.go" {
 			t.Fatal("worktree isolation violated: w1 saw w2's file")
@@ -79,7 +82,7 @@ func TestSearchWorktreeSkipsNonFiniteVectors(t *testing.T) {
 	// Commit a NaN-vector artifact for bad.go directly.
 	nan := []float32{float32(math.NaN()), 0, 0, 0}
 	chID := core.ChunkID("fp", "badcontent")
-	must(t, c.PutChunkVector(ctx, chID, "r", "fp", nan))
+	must(t, c.PutChunkVector(ctx, chID, "r", "fp", nan, "nan-chunk"))
 	key := core.ArtifactKey{RepositoryID: "r", RelativePath: "bad.go", SourceHash: "hbad", Fingerprint: "fp"}
 	art := core.Artifact{ID: key.ArtifactID(), Key: key, Dimensions: 4, Chunks: []core.ArtifactChunk{{Ordinal: 0, ChunkID: chID, Vector: nan}}}
 	must(t, c.CommitUpdate(ctx,

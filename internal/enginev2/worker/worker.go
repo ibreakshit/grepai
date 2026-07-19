@@ -14,7 +14,7 @@ type Catalog interface {
 	WorktreeInfo(ctx context.Context, wt core.WorktreeID) (string, core.RepositoryID, error)
 	GenerationFingerprint(ctx context.Context, repo core.RepositoryID, gen core.Generation) (string, error)
 	GetArtifact(ctx context.Context, key core.ArtifactKey) (core.Artifact, bool, error)
-	PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32) error
+	PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error
 	CommitUpdate(ctx context.Context, req core.CommitRequest, job core.Job) error
 	CommitDelete(ctx context.Context, wt core.WorktreeID, relPath string, gen core.Generation, job core.Job) error
 	DeadLetterJob(ctx context.Context, job core.Job, reason string) error
@@ -153,7 +153,7 @@ func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, art
 	}
 	if !wholeHit {
 		for _, ch := range art.Chunks {
-			if err := w.cat.PutChunkVector(ctx, ch.ChunkID, repo, fp, ch.Vector); err != nil {
+			if err := w.cat.PutChunkVector(ctx, ch.ChunkID, repo, fp, ch.Vector, ch.Content); err != nil {
 				return OutcomeTransient, ep, err
 			}
 		}

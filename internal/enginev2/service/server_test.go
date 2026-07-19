@@ -48,7 +48,7 @@ func seedWorktreeArtifact(t *testing.T, c *sqlite.Catalog, emb *enginetest.FakeE
 	}
 	key := core.ArtifactKey{RepositoryID: repo, RelativePath: path, SourceHash: path + content, Fingerprint: "fp"}
 	chID := core.ChunkID("fp", content)
-	if err := c.PutChunkVector(ctx, chID, repo, "fp", vec); err != nil {
+	if err := c.PutChunkVector(ctx, chID, repo, "fp", vec, content); err != nil {
 		t.Fatal(err)
 	}
 	art := core.Artifact{ID: key.ArtifactID(), Key: key, Dimensions: 4, Chunks: []core.ArtifactChunk{{Ordinal: 0, ChunkID: chID, Vector: vec}}}

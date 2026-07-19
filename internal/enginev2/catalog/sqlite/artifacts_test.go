@@ -68,7 +68,7 @@ func TestChunkVectorRoundTrip(t *testing.T) {
 	c := newTestCatalog(t)
 	seedRepo(t, c, "repo1")
 	vec := []float32{1, 2, 3, 4}
-	if err := c.PutChunkVector(ctx, "chunk1", "repo1", "fp", vec); err != nil {
+	if err := c.PutChunkVector(ctx, "chunk1", "repo1", "fp", vec, "content1"); err != nil {
 		t.Fatalf("put chunk: %v", err)
 	}
 	got, ok, err := c.GetChunkVector(ctx, "chunk1")

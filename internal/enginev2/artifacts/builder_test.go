@@ -43,6 +43,9 @@ func TestBuildEmbedsMissesOnlyAndReusesCache(t *testing.T) {
 	if len(art.Chunks) == 0 {
 		t.Fatal("expected chunks")
 	}
+	if art.Chunks[0].Content == "" {
+		t.Fatal("built chunk must carry display content for search snippets")
+	}
 	if art.Dimensions != 4 {
 		t.Fatalf("dims=%d", art.Dimensions)
 	}

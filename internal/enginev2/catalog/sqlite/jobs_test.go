@@ -39,7 +39,7 @@ func TestCommitUpdatePersistsArtifactChunks(t *testing.T) {
 		Dimensions: 3,
 	}
 	// Pre-store chunk vectors (cache warming), as the worker does before commit.
-	if err := c.PutChunkVector(ctx, "ch-0", "r", "fp", []float32{1, 2, 3}); err != nil {
+	if err := c.PutChunkVector(ctx, "ch-0", "r", "fp", []float32{1, 2, 3}, "chunk-0"); err != nil {
 		t.Fatal(err)
 	}
 	req := core.CommitRequest{

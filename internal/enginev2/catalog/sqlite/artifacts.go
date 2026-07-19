@@ -40,8 +40,8 @@ func putArtifactTx(ctx context.Context, tx *sql.Tx, a core.Artifact) error {
 func putArtifactChunksTx(ctx context.Context, tx *sql.Tx, artifactID core.ArtifactID, chunks []core.ArtifactChunk) error {
 	for _, ch := range chunks {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO artifact_chunks(artifact_id, ordinal, chunk_id)
-			VALUES(?, ?, ?)`, string(artifactID), ch.Ordinal, ch.ChunkID); err != nil {
+			INSERT OR IGNORE INTO artifact_chunks(artifact_id, ordinal, chunk_id, start_line, end_line)
+			VALUES(?, ?, ?, ?, ?)`, string(artifactID), ch.Ordinal, ch.ChunkID, ch.StartLine, ch.EndLine); err != nil {
 			return err
 		}
 	}
@@ -66,14 +66,16 @@ func (c *Catalog) GetArtifact(ctx context.Context, key core.ArtifactKey) (core.A
 	return core.Artifact{ID: core.ArtifactID(id), Key: key, Dimensions: dims}, true, nil
 }
 
-// PutChunkVector stores a chunk's validated float32 vector.
-func (c *Catalog) PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32) error {
+// PutChunkVector stores a chunk's validated float32 vector and its display
+// content. Content is content-addressed (stable per chunk_id), so INSERT OR
+// IGNORE keeps the first writer's content.
+func (c *Catalog) PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error {
 	blob := encodeVector(vec)
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO chunks(chunk_id, repository_id, fingerprint, dimensions, vector, created_at)
-			VALUES(?, ?, ?, ?, ?, datetime('now'))`,
-			chunkID, string(repo), fingerprint, len(vec), blob)
+			INSERT OR IGNORE INTO chunks(chunk_id, repository_id, fingerprint, dimensions, vector, content, created_at)
+			VALUES(?, ?, ?, ?, ?, ?, datetime('now'))`,
+			chunkID, string(repo), fingerprint, len(vec), blob, content)
 		return err
 	})
 }

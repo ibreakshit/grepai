@@ -102,7 +102,7 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 			if len(vec) != dims {
 				return core.Artifact{}, EndpointNotContacted, ErrDimensionMismatch
 			}
-			art.Chunks[i] = core.ArtifactChunk{Ordinal: i, ChunkID: id, Vector: vec}
+			art.Chunks[i] = core.ArtifactChunk{Ordinal: i, ChunkID: id, Vector: vec, Content: info.Content, StartLine: info.StartLine, EndLine: info.EndLine}
 			continue
 		}
 		if _, seen := missByID[id]; !seen {
@@ -132,7 +132,8 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 	for _, ord := range missOrds {
 		id := idByOrd[ord]
 		vec := vecs[missByID[id]]
-		art.Chunks[ord] = core.ArtifactChunk{Ordinal: ord, ChunkID: id, Vector: vec}
+		info := infos[ord]
+		art.Chunks[ord] = core.ArtifactChunk{Ordinal: ord, ChunkID: id, Vector: vec, Content: info.Content, StartLine: info.StartLine, EndLine: info.EndLine}
 	}
 	return art, EndpointSucceeded, nil
 }
