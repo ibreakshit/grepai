@@ -1,0 +1,359 @@
+package scheduler
+
+import (
+	"context"
+	"math/rand"
+	"sync"
+	"time"
+
+	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/worker"
+)
+
+// pollInterval is the fallback wake used when no Submit signal arrives, so an
+// idle loop still re-checks the queue. Signals (from Submit and dispatch
+// completion) are the primary wake; this only bounds worst-case latency.
+const pollInterval = 1 * time.Second
+
+// Queue is the durable job-queue surface the Engine paces over (the catalog).
+type Queue interface {
+	RepositoriesWithPendingJobs(ctx context.Context) ([]core.RepositoryID, error)
+	ClaimNextJobInRepo(ctx context.Context, repo core.RepositoryID, minPriority core.Priority) (core.Job, bool, error)
+	QueueDepthByPriority(ctx context.Context) (map[core.Priority]int, error)
+	UpsertJob(ctx context.Context, job core.Job) error
+	DeadLetterJob(ctx context.Context, job core.Job, reason string) error
+}
+
+// Processor processes one already-claimed job (satisfied by *worker.Worker).
+type Processor interface {
+	ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, error)
+}
+
+// Engine is the single host-wide admission-control and pacing layer over the
+// durable catalog queue and the worker (invariant 2: one host, one scheduler).
+type Engine struct {
+	cfg     Config
+	q       Queue
+	p       Processor
+	clock   Clock
+	breaker *circuitBreaker
+
+	indexSlots chan struct{} // buffered cap MaxIndexInflight; send=acquire, recv=release
+	querySlots chan struct{} // buffered cap ReservedQueryInflight; independent reserved pool
+	signal     chan struct{} // buffered 1; wakes the Run loop
+
+	wg sync.WaitGroup // tracks dispatch + retry goroutines so Run drains before returning
+
+	mu       sync.Mutex
+	rng      *rand.Rand
+	attempts map[string]int
+	depth    map[core.Priority]int
+	inFlight int
+	rrCursor int
+}
+
+var _ Scheduler = (*Engine)(nil)
+
+// New constructs an Engine. The seed makes jitter deterministic in tests.
+func New(cfg Config, q Queue, p Processor, clock Clock, seed int64) (*Engine, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return &Engine{
+		cfg:        cfg,
+		q:          q,
+		p:          p,
+		clock:      clock,
+		breaker:    newCircuitBreaker(clock, cfg.CircuitOpenAfter, cfg.CircuitProbeInterval),
+		indexSlots: make(chan struct{}, cfg.MaxIndexInflight),
+		querySlots: make(chan struct{}, cfg.ReservedQueryInflight),
+		signal:     make(chan struct{}, 1),
+		rng:        rand.New(rand.NewSource(seed)), // #nosec G404 - jitter only, not security-sensitive
+		attempts:   map[string]int{},
+		depth:      map[core.Priority]int{},
+	}, nil
+}
+
+// Submit durably enqueues a job and wakes the loop.
+func (e *Engine) Submit(ctx context.Context, job core.Job) error {
+	if err := e.q.UpsertJob(ctx, job); err != nil {
+		return err
+	}
+	e.wake()
+	return nil
+}
+
+// Run drives the claim/dispatch loop until ctx is canceled, then waits for all
+// in-flight dispatch and retry goroutines to finish before returning.
+func (e *Engine) Run(ctx context.Context) error {
+	defer e.wg.Wait()
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		e.refreshDepth(ctx)
+
+		// Acquire an index slot (blocks on a free slot or ctx). This is the
+		// backpressure: at most MaxIndexInflight dispatches run at once.
+		release, err := e.acquireIndex(ctx)
+		if err != nil {
+			return ctx.Err()
+		}
+
+		// Circuit gate. When open+elapsed, Allow transitions to half-open and
+		// returns true exactly once (the probe). When not allowed, release the
+		// slot and wait for the probe interval or a wake.
+		if !e.breaker.Allow() {
+			release()
+			if !e.waitBackoff(ctx) {
+				return ctx.Err()
+			}
+			continue
+		}
+
+		job, ok, cerr := e.claimRoundRobin(ctx)
+		if cerr != nil || !ok {
+			// Consumed a probe token but have no work to dispatch: don't wedge
+			// the breaker half-open.
+			e.breaker.abortProbe()
+			release()
+			if cerr != nil {
+				// Transient read error: back off briefly, then retry the loop.
+				if !e.waitBackoff(ctx) {
+					return ctx.Err()
+				}
+				continue
+			}
+			if !e.waitForWork(ctx) {
+				return ctx.Err()
+			}
+			continue
+		}
+
+		e.wg.Add(1)
+		go e.dispatch(ctx, job, release)
+	}
+}
+
+// dispatch processes one claimed job, accounts the outcome, releases the slot,
+// and wakes the loop. Runs in its own goroutine.
+func (e *Engine) dispatch(ctx context.Context, job core.Job, release func()) {
+	defer e.wg.Done()
+	defer e.wake()
+	defer release()
+	e.addInFlight(1)
+	defer e.addInFlight(-1)
+
+	oc, cause := e.p.ProcessClaimed(ctx, job)
+	e.account(ctx, job, oc, cause)
+}
+
+// account applies the outcome: circuit accounting, retry scheduling with
+// backoff, and dead-lettering after bounded attempts.
+func (e *Engine) account(ctx context.Context, job core.Job, oc worker.Outcome, cause error) {
+	key := jobKey(job)
+	switch oc {
+	case worker.OutcomeCommitted, worker.OutcomeSuperseded:
+		e.breaker.RecordSuccess()
+		e.clearAttempts(key)
+	case worker.OutcomePermanent:
+		// A shape error is not an endpoint-availability signal; leave the breaker.
+		e.clearAttempts(key)
+		_ = e.q.DeadLetterJob(ctx, job, "permanent: "+errMsg(cause))
+	case worker.OutcomeTransient:
+		e.breaker.RecordFailure()
+		n := e.incAttempts(key)
+		if n >= e.cfg.MaxJobAttempts {
+			e.clearAttempts(key)
+			_ = e.q.DeadLetterJob(ctx, job, "attempts exhausted: "+errMsg(cause))
+			return
+		}
+		e.scheduleRetry(ctx, job, n)
+	default:
+		// Unclassified (injected crash): leave the job claimed; a restart's
+		// worker.Recover requeues it. No circuit accounting.
+	}
+}
+
+// scheduleRetry re-dispatches a transiently-failed job after a full-jitter
+// backoff. The job is still claimed, so it needs no re-claim; the retry
+// goroutine holds it until it can dispatch (respecting the circuit).
+func (e *Engine) scheduleRetry(ctx context.Context, job core.Job, attempt int) {
+	delay := fullJitterDelay(attempt, e.cfg, e.unit())
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		select {
+		case <-ctx.Done():
+			return
+		case <-e.clock.After(delay):
+		}
+		e.dispatchWhenReady(ctx, job)
+	}()
+}
+
+// dispatchWhenReady blocks until an index slot is free and the circuit admits
+// a call, then dispatches the (still-claimed) job. It self-drives because a
+// claimed job is invisible to the Run loop's claim.
+func (e *Engine) dispatchWhenReady(ctx context.Context, job core.Job) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		release, err := e.acquireIndex(ctx)
+		if err != nil {
+			return
+		}
+		if e.breaker.Allow() {
+			e.wg.Add(1)
+			e.dispatch(ctx, job, release)
+			return
+		}
+		release()
+		if !e.waitBackoff(ctx) {
+			return
+		}
+	}
+}
+
+// Stats returns a point-in-time snapshot.
+func (e *Engine) Stats() Stats {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	depth := make(map[core.Priority]int, len(e.depth))
+	for k, v := range e.depth {
+		depth[k] = v
+	}
+	return Stats{
+		InFlight:             e.inFlight,
+		ReservedQuery:        len(e.querySlots),
+		QueueDepthByPriority: depth,
+	}
+}
+
+// AcquireIndexSlot blocks for an index slot (or ctx), returning a release func.
+func (e *Engine) AcquireIndexSlot(ctx context.Context) (func(), error) {
+	return e.acquireIndex(ctx)
+}
+
+// AcquireQuerySlot blocks for a reserved query slot (or ctx). Query capacity is
+// an independent pool, so it is never consumed by indexing.
+func (e *Engine) AcquireQuerySlot(ctx context.Context) (func(), error) {
+	select {
+	case e.querySlots <- struct{}{}:
+		return func() { <-e.querySlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// --- internals ---
+
+func (e *Engine) acquireIndex(ctx context.Context) (func(), error) {
+	select {
+	case e.indexSlots <- struct{}{}:
+		return func() { <-e.indexSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (e *Engine) claimRoundRobin(ctx context.Context) (core.Job, bool, error) {
+	repos, err := e.q.RepositoriesWithPendingJobs(ctx)
+	if err != nil {
+		return core.Job{}, false, err
+	}
+	if len(repos) == 0 {
+		return core.Job{}, false, nil
+	}
+	e.mu.Lock()
+	start := e.rrCursor
+	e.mu.Unlock()
+	for i := 0; i < len(repos); i++ {
+		idx := (start + i) % len(repos)
+		job, ok, err := e.q.ClaimNextJobInRepo(ctx, repos[idx], core.PriorityBootstrap)
+		if err != nil {
+			return core.Job{}, false, err
+		}
+		if ok {
+			e.mu.Lock()
+			e.rrCursor = (idx + 1) % len(repos)
+			e.mu.Unlock()
+			return job, true, nil
+		}
+	}
+	return core.Job{}, false, nil
+}
+
+func (e *Engine) waitBackoff(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-e.clock.After(e.cfg.CircuitProbeInterval):
+		return true
+	case <-e.signal:
+		return true
+	}
+}
+
+func (e *Engine) waitForWork(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-e.signal:
+		return true
+	case <-e.clock.After(pollInterval):
+		return true
+	}
+}
+
+func (e *Engine) wake() {
+	select {
+	case e.signal <- struct{}{}:
+	default:
+	}
+}
+
+func (e *Engine) refreshDepth(ctx context.Context) {
+	d, err := e.q.QueueDepthByPriority(ctx)
+	if err != nil {
+		return
+	}
+	e.mu.Lock()
+	e.depth = d
+	e.mu.Unlock()
+}
+
+func (e *Engine) unit() float64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.rng.Float64()
+}
+
+func (e *Engine) addInFlight(d int) {
+	e.mu.Lock()
+	e.inFlight += d
+	e.mu.Unlock()
+}
+
+func (e *Engine) incAttempts(key string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.attempts[key]++
+	return e.attempts[key]
+}
+
+func (e *Engine) clearAttempts(key string) {
+	e.mu.Lock()
+	delete(e.attempts, key)
+	e.mu.Unlock()
+}
+
+func jobKey(j core.Job) string { return string(j.WorktreeID) + "\x00" + j.Path }
+
+func errMsg(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	return err.Error()
+}

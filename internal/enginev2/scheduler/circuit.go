@@ -75,6 +75,19 @@ func (b *circuitBreaker) RecordFailure() {
 	}
 }
 
+// abortProbe reverts a half-open probe back to open (re-stamping the timer)
+// when the scheduler consumed a probe token via Allow but found no work to
+// dispatch — so the breaker is not wedged half-open waiting for a probe result
+// that never comes.
+func (b *circuitBreaker) abortProbe() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == circuitHalfOpen {
+		b.state = circuitOpen
+		b.openedAt = b.clock.Now()
+	}
+}
+
 // State returns a human-readable state for Stats/tests.
 func (b *circuitBreaker) State() string {
 	b.mu.Lock()
