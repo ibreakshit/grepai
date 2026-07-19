@@ -119,10 +119,10 @@ func Open(ctx context.Context, catalogPath, root string, emb embedder.Embedder, 
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, err
 	}
-	// Self-ignore the data directory so reconciliation never indexes the v2
+	// Self-ignore the data directory so reconciliation never indexes the
 	// catalog's own files (a nested .gitignore of "*" is honored by git's
 	// --exclude-standard untracked scan even if the repo root does not list it).
-	if err := ensureSelfIgnore(dataDir); err != nil {
+	if err := ensureSelfIgnore(dataDir, filepath.Base(catalogPath)); err != nil {
 		return nil, err
 	}
 	cat, err := sqlite.Open(ctx, catalogPath)
@@ -213,13 +213,14 @@ func (e *Engine) Search(ctx context.Context, query string) ([]core.SearchHit, co
 // Close releases the catalog.
 func (e *Engine) Close() error { return e.cat.Close() }
 
-// ensureSelfIgnore makes sure the v2 data directory ignores its own catalog
-// files, so reconciliation never indexes them. If no .gitignore exists it writes
-// one ignoring everything; if one exists it is preserved and the catalog
-// patterns are appended only when they are not already covered.
-func ensureSelfIgnore(dir string) error {
+// ensureSelfIgnore makes sure the data directory ignores the opened catalog's
+// own files (catalogFile plus its SQLite -wal/-shm siblings), so reconciliation
+// never indexes them. If no .gitignore exists it writes one ignoring everything;
+// if one exists it is preserved and the catalog patterns are appended only when
+// they are not already covered.
+func ensureSelfIgnore(dir, catalogFile string) error {
 	path := filepath.Join(dir, ".gitignore")
-	patterns := []string{"catalog_v2.db", "catalog_v2.db-wal", "catalog_v2.db-shm"}
+	patterns := []string{catalogFile, catalogFile + "-wal", catalogFile + "-shm"}
 	existing, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return os.WriteFile(path, []byte("*\n"), 0o600)
