@@ -179,8 +179,9 @@ func TestDeleteOpRemovesView(t *testing.T) {
 	if _, err := w.ProcessOne(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Then a delete op at gen 2.
-	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "", Generation: 2, Operation: core.OpDelete, Priority: core.PriorityReconcile}))
+	// Then a delete op at the active generation (a real delete reconciles at the
+	// active generation; a non-active/rebuild delete must not touch the active view).
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "", Generation: 1, Operation: core.OpDelete, Priority: core.PriorityReconcile}))
 	if _, err := w.ProcessOne(ctx); err != nil {
 		t.Fatal(err)
 	}

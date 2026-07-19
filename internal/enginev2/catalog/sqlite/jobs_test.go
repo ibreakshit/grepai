@@ -116,6 +116,30 @@ func TestCommitAtNonActiveGenerationDoesNotSwitchView(t *testing.T) {
 	}
 }
 
+// A delete for a non-active generation (a controlled rebuild) completes its job
+// but must NOT remove the active worktree view (invariant 12; symmetric to the
+// upsert guard — Codex Phase 5 re-review).
+func TestCommitDeleteAtNonActiveGenerationKeepsView(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "r", "w")
+	seedGeneration(t, c, "r", 1, "fp") // gen 1 active
+	artA := mkArtifact("r", "a.go", "h1", "fp")
+	must(t, c.CommitUpdate(ctx,
+		core.CommitRequest{View: core.ViewEntry{WorktreeID: "w", Path: "a.go", ArtifactID: artA.ID, Generation: 1}, Artifact: artA},
+		core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert}))
+
+	// A gen-2 (building, non-active) delete job for the same path.
+	must(t, c.CreateGeneration(ctx, "r", 2, "fp2"))
+	del := core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "", Generation: 2, Operation: core.OpDelete}
+	must(t, c.UpsertJob(ctx, del))
+	must(t, c.CommitDelete(ctx, "w", "a.go", 2, del))
+	// The active gen-1 view must survive the non-active delete.
+	if id, ok, _ := c.ResolveView(ctx, "w", "a.go"); !ok || id != artA.ID {
+		t.Fatalf("active view must survive a non-active-generation delete: ok=%v id=%s", ok, id)
+	}
+}
+
 func TestCommitDeleteSupersededKeepsNewerUpsert(t *testing.T) {
 	ctx := context.Background()
 	c := newTestCatalog(t)

@@ -52,17 +52,9 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 	// active worktree view, so the active generation stays queryable until the
 	// rebuild is activated. When no generation is active yet (fresh/bootstrap),
 	// the switch proceeds.
-	switchView := true
-	var active sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `
-		SELECT g.generation FROM index_generations g
-		JOIN worktrees w ON w.repository_id = g.repository_id
-		WHERE w.worktree_id=? AND g.status='active'`,
-		string(req.View.WorktreeID)).Scan(&active); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	switchView, err := commitTouchesActiveView(ctx, tx, req.View.WorktreeID, req.View.Generation)
+	if err != nil {
 		return err
-	}
-	if active.Valid && active.Int64 != int64(req.View.Generation) {
-		switchView = false
 	}
 	// Switch the view only if this generation is at least as new as the one
 	// currently recorded — a superseded (older-generation) commit must not
@@ -84,11 +76,31 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 	// survive so its own commit can run (spec §5.6: only the newest desired
 	// state commits). Guarding on desired_hash is essential: without it, a
 	// stale same-generation commit would delete the newer save's job.
-	_, err := tx.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		DELETE FROM index_jobs
 		WHERE worktree_id=? AND relative_path=? AND generation<=? AND desired_hash=?`,
 		string(job.WorktreeID), job.Path, int64(req.View.Generation), job.DesiredHash)
 	return err
+}
+
+// commitTouchesActiveView reports whether a commit at gen may modify the active
+// worktree view: true when gen is the repository's active generation, or when no
+// generation is active yet (bootstrap). A commit for a non-active generation (a
+// building rebuild) stores its artifact but must not disturb the active view
+// (invariant 12).
+func commitTouchesActiveView(ctx context.Context, tx *sql.Tx, wt core.WorktreeID, gen core.Generation) (bool, error) {
+	var active sql.NullInt64
+	err := tx.QueryRowContext(ctx, `
+		SELECT g.generation FROM index_generations g
+		JOIN worktrees w ON w.repository_id = g.repository_id
+		WHERE w.worktree_id=? AND g.status='active'`, string(wt)).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) || !active.Valid {
+		return true, nil // no active generation yet: bootstrap commit switches
+	}
+	if err != nil {
+		return false, err
+	}
+	return active.Int64 == int64(gen), nil
 }
 
 // CommitDelete atomically fulfills a delete job: it removes the exact job row
@@ -117,6 +129,16 @@ func (c *Catalog) CommitDelete(ctx context.Context, wt core.WorktreeID, relPath 
 		}
 		if n == 0 {
 			return nil // superseded: leave the view for the surviving upsert job
+		}
+		// Invariant 12: only an active-generation delete may remove the active
+		// view. A non-active (building rebuild) delete completes its job but
+		// leaves the active generation's view intact.
+		touchesActive, err := commitTouchesActiveView(ctx, tx, wt, gen)
+		if err != nil {
+			return err
+		}
+		if !touchesActive {
+			return nil
 		}
 		_, err = tx.ExecContext(ctx, `
 			DELETE FROM worktree_files

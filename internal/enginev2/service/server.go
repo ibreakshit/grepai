@@ -23,7 +23,7 @@ type Catalog interface {
 	ActiveGeneration(ctx context.Context, repo core.RepositoryID) (core.Generation, error)
 	GenerationFingerprint(ctx context.Context, repo core.RepositoryID, gen core.Generation) (string, error)
 	CreateGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation, fingerprint string) error
-	SetActiveGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation) error
+	EnsureActiveGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation, fingerprint string) error
 	SearchWorktree(ctx context.Context, wt core.WorktreeID, query []float32, limit int) ([]core.SearchHit, error)
 	WorktreePendingCount(ctx context.Context, wt core.WorktreeID) (int, error)
 	WorktreePathsPending(ctx context.Context, wt core.WorktreeID, paths []string) (bool, error)
@@ -73,17 +73,11 @@ func (s *Server) Register(ctx context.Context, req RegisterRequest) (RegisterRes
 	if err := s.cat.RegisterWorktree(ctx, wt, repo, req.Root, 1); err != nil {
 		return RegisterResponse{}, err
 	}
-	active, err := s.cat.ActiveGeneration(ctx, repo)
-	if err != nil {
+	// Bootstrap an active generation 1 atomically and idempotently, so a
+	// freshly-registered repo can reconcile/index/rebuild immediately and
+	// concurrent/retried Register calls are safe.
+	if err := s.cat.EnsureActiveGeneration(ctx, repo, 1, s.fingerprint); err != nil {
 		return RegisterResponse{}, err
-	}
-	if active == 0 {
-		if err := s.cat.CreateGeneration(ctx, repo, 1, s.fingerprint); err != nil {
-			return RegisterResponse{}, err
-		}
-		if err := s.cat.SetActiveGeneration(ctx, repo, 1); err != nil {
-			return RegisterResponse{}, err
-		}
 	}
 	return RegisterResponse{RepositoryID: repo, WorktreeID: wt}, nil
 }

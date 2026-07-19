@@ -46,6 +46,29 @@ func (c *Catalog) CreateGeneration(ctx context.Context, repo core.RepositoryID, 
 	})
 }
 
+// EnsureActiveGeneration idempotently and atomically establishes gen as an
+// active generation for a repository: it creates the generation if absent, then
+// activates it only if the repository has no active generation yet. Safe under
+// concurrent callers (the single serialized writer + INSERT OR IGNORE + the
+// NOT EXISTS guard mean exactly one activation, no duplicate-key failure, and no
+// wedged half-bootstrapped state). Used to bootstrap a freshly registered repo.
+func (c *Catalog) EnsureActiveGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation, fingerprint string) error {
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO index_generations(repository_id, generation, fingerprint, status, created_at)
+			VALUES(?, ?, ?, 'building', datetime('now'))`,
+			string(repo), int64(gen), fingerprint); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			UPDATE index_generations SET status='active'
+			WHERE repository_id=? AND generation=?
+			AND NOT EXISTS (SELECT 1 FROM index_generations WHERE repository_id=? AND status='active')`,
+			string(repo), int64(gen), string(repo))
+		return err
+	})
+}
+
 // SetActiveGeneration retires any current active generation and makes gen active.
 func (c *Catalog) SetActiveGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation) error {
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {

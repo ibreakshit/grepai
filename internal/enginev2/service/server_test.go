@@ -144,6 +144,27 @@ func TestRegisterAndRebuild(t *testing.T) {
 	}
 }
 
+// Register is idempotent and retry-safe: repeated calls neither error nor
+// create a second generation (Codex Phase 5 re-review).
+func TestRegisterIdempotent(t *testing.T) {
+	ctx := context.Background()
+	_, _, s := newServer(t)
+	for i := 0; i < 3; i++ {
+		if _, err := s.Register(ctx, service.RegisterRequest{Root: "/repo/y"}); err != nil {
+			t.Fatalf("register %d must be idempotent: %v", i, err)
+		}
+	}
+	st, err := s.Status(ctx, service.StatusRequest{WorktreeID: "/repo/y"})
+	if err != nil || st.ActiveGeneration != 1 {
+		t.Fatalf("repeated register must leave exactly active gen 1: st=%+v err=%v", st, err)
+	}
+	// Rebuild must produce generation 2 (proving only one generation 1 exists).
+	rb, err := s.Rebuild(ctx, service.RebuildRequest{RepositoryID: "/repo/y"})
+	if err != nil || rb.Generation != 2 {
+		t.Fatalf("rebuild after repeated register: gen=%d err=%v", rb.Generation, err)
+	}
+}
+
 func TestWaitFreshUnknownWorktreeErrors(t *testing.T) {
 	ctx := context.Background()
 	_, _, s := newServer(t)
