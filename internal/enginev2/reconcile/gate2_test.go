@@ -128,12 +128,18 @@ func TestGate2_BranchSwitchExactMatch(t *testing.T) {
 	if j, ok := byPath["onmain.go"]; !ok || j.Operation != core.OpDelete {
 		t.Fatalf("onmain.go should be deleted after branch switch: %+v", byPath)
 	}
+	if len(p.Jobs) != 3 {
+		t.Fatalf("branch switch should produce exactly 3 jobs, got %d: %+v", len(p.Jobs), p.Jobs)
+	}
 
 	// Apply upserts, then a final reconcile shows only the pending delete (view
 	// still references onmain.go until a worker removes it) — the upserts have
 	// converged.
 	applyPlan(t, c, "repo1", wt, p)
 	p2 := mustReconcile(t, r, wt)
+	if len(p2.Jobs) != 1 {
+		t.Fatalf("after applying upserts, exactly one delete should remain, got %d: %+v", len(p2.Jobs), p2.Jobs)
+	}
 	for _, j := range p2.Jobs {
 		if j.Operation != core.OpDelete || j.Path != "onmain.go" {
 			t.Fatalf("after applying upserts, only the onmain.go delete should remain, got %+v", j)

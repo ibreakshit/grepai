@@ -3,6 +3,8 @@ package reconcile
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -88,5 +90,61 @@ func TestReconcileJobsDeterministicOrder(t *testing.T) {
 	// Both deletes, sorted by path: a.go before z.go.
 	if len(p.Jobs) != 2 || p.Jobs[0].Path != "a.go" || p.Jobs[1].Path != "z.go" {
 		t.Fatalf("jobs not deterministically ordered: %+v", p.Jobs)
+	}
+}
+
+func TestReconcileNonGitFilesystem(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, content string) {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile("a.txt", "hello")
+	writeFile("sub/b.txt", "world")
+
+	fr := &fakeReader{root: dir, repo: "repo1", gen: 1, indexed: map[string]string{}}
+	r := New(fr) // real defaultTruth -> non-git dir -> filesystemTruth
+	ctx := context.Background()
+
+	p, err := r.Reconcile(ctx, "wt1")
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(p.Jobs) != 2 {
+		t.Fatalf("want 2 upserts for non-git dir, got %d: %+v", len(p.Jobs), p.Jobs)
+	}
+	for _, j := range p.Jobs {
+		if j.Operation != core.OpUpsert {
+			t.Fatalf("want upsert, got %+v", j)
+		}
+	}
+
+	// Feed the produced hashes back as indexed; an unchanged reconcile is idle.
+	indexed := map[string]string{}
+	for _, j := range p.Jobs {
+		indexed[j.Path] = j.DesiredHash
+	}
+	fr.indexed = indexed
+	p2, err := r.Reconcile(ctx, "wt1")
+	if err != nil {
+		t.Fatalf("reconcile2: %v", err)
+	}
+	if len(p2.Jobs) != 0 {
+		t.Fatalf("unchanged non-git reconcile must be idle, got %+v", p2.Jobs)
+	}
+
+	// Mutating one file yields exactly one upsert.
+	writeFile("a.txt", "changed")
+	p3, err := r.Reconcile(ctx, "wt1")
+	if err != nil {
+		t.Fatalf("reconcile3: %v", err)
+	}
+	if len(p3.Jobs) != 1 || p3.Jobs[0].Path != "a.txt" || p3.Jobs[0].Operation != core.OpUpsert {
+		t.Fatalf("mutated non-git file must yield a single upsert, got %+v", p3.Jobs)
 	}
 }

@@ -106,6 +106,9 @@ func filesystemTruth(root string) (map[string]string, error) {
 			}
 			return nil
 		}
+		if !d.Type().IsRegular() {
+			return nil // skip symlinks, devices, sockets, etc.
+		}
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return err

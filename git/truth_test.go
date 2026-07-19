@@ -130,3 +130,28 @@ func TestWorktreeTruthRespectsGitignore(t *testing.T) {
 		t.Fatal("ignored glob must be excluded")
 	}
 }
+
+func TestWorktreeTruthPathsWithSpaces(t *testing.T) {
+	dir := mkRepo(t)
+	write(t, dir, "dir with space/f a.go", "package a\n")
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-q", "-m", "c1")
+
+	truth, err := WorktreeTruth(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("truth: %v", err)
+	}
+	if truth["dir with space/f a.go"] == "" {
+		t.Fatalf("tracked path with spaces missing: %v", truth)
+	}
+
+	// Untracked path with spaces must also survive the NUL/hash-object path.
+	write(t, dir, "unt racked.go", "package u\n")
+	truth2, err := WorktreeTruth(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("truth2: %v", err)
+	}
+	if truth2["unt racked.go"] == "" {
+		t.Fatalf("untracked path with spaces missing: %v", truth2)
+	}
+}
