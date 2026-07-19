@@ -17,14 +17,29 @@ type BuildRequest struct {
 	Content []byte
 }
 
+// EndpointResult reports how the embedding backend was involved in a build, so
+// the scheduler's circuit breaker reacts only to genuine endpoint health
+// signals — independent of any later local (catalog) error. A successful embed
+// stays EndpointSucceeded even if a subsequent commit fails locally.
+type EndpointResult uint8
+
+const (
+	// EndpointNotContacted: no EmbedBatch call (empty, or fully cache-served).
+	EndpointNotContacted EndpointResult = iota
+	// EndpointSucceeded: an EmbedBatch call returned (endpoint reachable), even
+	// if its output was then rejected as a dimension mismatch.
+	EndpointSucceeded
+	// EndpointFailed: an EmbedBatch call failed with an availability error.
+	EndpointFailed
+)
+
 // ArtifactBuilder transforms content, reuses compatible cached chunk vectors,
 // embeds only cache misses, validates returned dimensions, and returns the
-// immutable artifact ready for an atomic catalog commit. The bool return
-// reports whether the embedding backend was actually contacted (an EmbedBatch
-// call was made) — the scheduler's circuit breaker only reacts to real endpoint
-// signals, so a fully cache-served build reports false.
+// immutable artifact ready for an atomic catalog commit. The EndpointResult
+// reports how the embedding backend was involved, so the scheduler's circuit
+// breaker reacts only to real endpoint signals.
 type ArtifactBuilder interface {
-	Build(ctx context.Context, req BuildRequest) (core.Artifact, bool, error)
+	Build(ctx context.Context, req BuildRequest) (core.Artifact, EndpointResult, error)
 }
 
 // ErrDimensionMismatch signals an embedding (or cached vector) whose length
@@ -58,16 +73,15 @@ func New(ch Chunker, emb embedder.Embedder, cache ChunkCache) *DefaultBuilder {
 var _ ArtifactBuilder = (*DefaultBuilder)(nil)
 
 // Build transforms content into an immutable artifact, reusing compatible
-// cached chunk vectors and embedding only the misses (spec §5.5). The second
-// return reports whether the embedding backend was contacted (an EmbedBatch
-// call was attempted, success or failure).
-func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Artifact, bool, error) {
+// cached chunk vectors and embedding only the misses (spec §5.5). The
+// EndpointResult reports how the embedding backend was involved.
+func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Artifact, EndpointResult, error) {
 	dims := b.emb.Dimensions()
 	art := core.Artifact{ID: req.Key.ArtifactID(), Key: req.Key, Dimensions: dims}
 
 	infos := b.chunker.Chunk(req.Key.RelativePath, string(req.Content))
 	if len(infos) == 0 {
-		return art, false, nil // valid empty artifact; no backend contact
+		return art, EndpointNotContacted, nil // valid empty artifact
 	}
 
 	art.Chunks = make([]core.ArtifactChunk, len(infos))
@@ -82,11 +96,11 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 		idByOrd[i] = id
 		vec, ok, err := b.cache.GetChunkVector(ctx, id)
 		if err != nil {
-			return core.Artifact{}, false, err
+			return core.Artifact{}, EndpointNotContacted, err // local cache read error
 		}
 		if ok {
 			if len(vec) != dims {
-				return core.Artifact{}, false, ErrDimensionMismatch
+				return core.Artifact{}, EndpointNotContacted, ErrDimensionMismatch
 			}
 			art.Chunks[i] = core.ArtifactChunk{Ordinal: i, ChunkID: id, Vector: vec}
 			continue
@@ -99,21 +113,20 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 	}
 
 	if len(missText) == 0 {
-		return art, false, nil // fully cache-served; no backend contact
+		return art, EndpointNotContacted, nil // fully cache-served
 	}
 
-	// From here the embedding backend is contacted (contacted=true), whether
-	// the call succeeds or fails.
 	vecs, err := b.emb.EmbedBatch(ctx, missText)
 	if err != nil {
-		return core.Artifact{}, true, err // worker classifies transient/permanent
+		return core.Artifact{}, EndpointFailed, err // availability failure
 	}
+	// The endpoint answered; it is reachable even if the answer is malformed.
 	if len(vecs) != len(missText) {
-		return core.Artifact{}, true, ErrDimensionMismatch
+		return core.Artifact{}, EndpointSucceeded, ErrDimensionMismatch
 	}
 	for _, v := range vecs {
 		if len(v) != dims {
-			return core.Artifact{}, true, ErrDimensionMismatch
+			return core.Artifact{}, EndpointSucceeded, ErrDimensionMismatch
 		}
 	}
 	for _, ord := range missOrds {
@@ -121,5 +134,5 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 		vec := vecs[missByID[id]]
 		art.Chunks[ord] = core.ArtifactChunk{Ordinal: ord, ChunkID: id, Vector: vec}
 	}
-	return art, true, nil
+	return art, EndpointSucceeded, nil
 }

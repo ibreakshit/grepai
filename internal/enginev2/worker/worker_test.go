@@ -56,8 +56,11 @@ type stubBuilder struct {
 	err error
 }
 
-func (b stubBuilder) Build(_ context.Context, _ artifacts.BuildRequest) (core.Artifact, bool, error) {
-	return b.art, b.err != nil, b.err // report contact when it produced an error (e.g. embed failure)
+func (b stubBuilder) Build(_ context.Context, _ artifacts.BuildRequest) (core.Artifact, artifacts.EndpointResult, error) {
+	if b.err != nil {
+		return b.art, artifacts.EndpointFailed, b.err
+	}
+	return b.art, artifacts.EndpointNotContacted, nil
 }
 
 func realBuilder(emb *enginetest.FakeEmbedder, c *sqlite.Catalog) worker.Builder {

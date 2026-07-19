@@ -37,8 +37,8 @@ func TestBuildEmbedsMissesOnlyAndReusesCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contacted {
-		t.Fatal("cold build must report backend contact")
+	if contacted != artifacts.EndpointSucceeded {
+		t.Fatalf("cold build must report endpoint success, got %d", contacted)
 	}
 	if len(art.Chunks) == 0 {
 		t.Fatal("expected chunks")
@@ -61,8 +61,8 @@ func TestBuildEmbedsMissesOnlyAndReusesCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if contacted2 {
-		t.Fatal("fully cache-served build must report no backend contact")
+	if contacted2 != artifacts.EndpointNotContacted {
+		t.Fatalf("fully cache-served build must report no contact, got %d", contacted2)
 	}
 	if emb2.TextsEmbedded() != 0 {
 		t.Fatalf("warm build must not embed, embedded=%d", emb2.TextsEmbedded())
@@ -83,8 +83,8 @@ func TestBuildRejectsCachedDimensionMismatch(t *testing.T) {
 	cache := mapCache{m: map[string][]float32{id: {1, 2, 3}}}
 	b := artifacts.New(ch, emb, cache)
 	_, contacted, err := b.Build(ctx, artifacts.BuildRequest{Key: core.ArtifactKey{RepositoryID: "r", RelativePath: "a.go", SourceHash: "h1", Fingerprint: "fp"}, Content: []byte("x")})
-	if contacted {
-		t.Fatal("a cached-vector mismatch reaches no backend")
+	if contacted != artifacts.EndpointNotContacted {
+		t.Fatalf("a cached-vector mismatch reaches no backend, got %d", contacted)
 	}
 	if err != artifacts.ErrDimensionMismatch {
 		t.Fatalf("want ErrDimensionMismatch, got %v", err)

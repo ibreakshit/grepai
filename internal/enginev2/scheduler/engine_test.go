@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yoanbernabeu/grepai/internal/enginev2/artifacts"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/enginetest"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/worker"
@@ -51,8 +52,8 @@ func (q *fakeQueue) DeadLetterJob(context.Context, core.Job, string) error { ret
 // fakeProcessor always commits (with backend contact).
 type fakeProcessor struct{}
 
-func (fakeProcessor) ProcessClaimed(context.Context, core.Job) (worker.Outcome, bool, error) {
-	return worker.OutcomeCommitted, true, nil
+func (fakeProcessor) ProcessClaimed(context.Context, core.Job) (worker.Outcome, artifacts.EndpointResult, error) {
+	return worker.OutcomeCommitted, artifacts.EndpointSucceeded, nil
 }
 
 // countProc counts ProcessClaimed invocations (to prove terminal retry does not
@@ -62,11 +63,11 @@ type countProc struct {
 	calls int
 }
 
-func (c *countProc) ProcessClaimed(context.Context, core.Job) (worker.Outcome, bool, error) {
+func (c *countProc) ProcessClaimed(context.Context, core.Job) (worker.Outcome, artifacts.EndpointResult, error) {
 	c.mu.Lock()
 	c.calls++
 	c.mu.Unlock()
-	return worker.OutcomePermanent, true, errors.New("bad dims")
+	return worker.OutcomePermanent, artifacts.EndpointSucceeded, errors.New("bad dims")
 }
 func (c *countProc) count() int {
 	c.mu.Lock()
@@ -191,6 +192,28 @@ func TestJobKeyDistinguishesIntent(t *testing.T) {
 	}
 }
 
+// A successful embed followed by a LOCAL (catalog) error must not trip the
+// endpoint circuit breaker (Codex re-review Medium: endpoint success survives a
+// later local write failure).
+func TestAccountEndpointSuccessSurvivesLocalError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultConfig()
+	cfg.CircuitOpenAfter = 1 // one wrong failure would open it
+	clk := enginetest.NewFakeClock(time.Unix(0, 0))
+	e, err := New(cfg, &fakeQueue{}, fakeProcessor{}, clk, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adm := e.breaker.Allow() // closed admission
+	job := core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, DesiredHash: "h1", Operation: core.OpUpsert}
+	// Outcome is transient (commit failed) but the endpoint succeeded.
+	e.account(ctx, job, worker.OutcomeTransient, artifacts.EndpointSucceeded, errors.New("sqlite busy"), adm)
+	if e.breaker.State() != "closed" {
+		t.Fatalf("a local error after a successful embed must not trip the endpoint breaker: %s", e.breaker.State())
+	}
+}
+
 // faultQueue fails the first dlErrs DeadLetterJob calls, then succeeds, and
 // records the reasons it was given.
 type faultQueue struct {
@@ -244,7 +267,7 @@ func TestAccountRetriesTerminalWriteFailure(t *testing.T) {
 	}
 	job := core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, DesiredHash: "h1", Operation: core.OpUpsert}
 	const reason = "permanent: bad dims"
-	e.account(ctx, job, worker.OutcomePermanent, true, errors.New("bad dims"), admission{ok: true})
+	e.account(ctx, job, worker.OutcomePermanent, artifacts.EndpointSucceeded, errors.New("bad dims"), admission{ok: true})
 	if q.calls() != 1 {
 		t.Fatalf("expected one failed dead-letter attempt, got %d", q.calls())
 	}
@@ -284,7 +307,7 @@ func TestAccountProbeWithoutContactDoesNotClose(t *testing.T) {
 		t.Fatal("expected a half-open probe token")
 	}
 	job := core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, DesiredHash: "h1", Operation: core.OpUpsert}
-	e.account(ctx, job, worker.OutcomeSuperseded, false /*contacted*/, nil, probe)
+	e.account(ctx, job, worker.OutcomeSuperseded, artifacts.EndpointNotContacted, nil, probe)
 	if e.breaker.State() == "closed" {
 		t.Fatal("a probe with no endpoint contact must not close the breaker")
 	}
@@ -306,7 +329,7 @@ func TestAccountProbeWithContactCloses(t *testing.T) {
 	clk.Advance(cfg.CircuitProbeInterval)
 	probe := e.breaker.Allow()
 	job := core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, DesiredHash: "h1", Operation: core.OpUpsert}
-	e.account(ctx, job, worker.OutcomeCommitted, true /*contacted*/, nil, probe)
+	e.account(ctx, job, worker.OutcomeCommitted, artifacts.EndpointSucceeded, nil, probe)
 	if e.breaker.State() != "closed" {
 		t.Fatalf("a real endpoint success on the probe must close: %s", e.breaker.State())
 	}

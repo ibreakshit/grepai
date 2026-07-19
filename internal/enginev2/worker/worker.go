@@ -35,9 +35,9 @@ func isSuperseded(curGen core.Generation, curHash string, ok bool, job core.Job)
 }
 
 // Builder builds an artifact from content (satisfied by *artifacts.DefaultBuilder).
-// The bool return reports whether the embedding backend was contacted.
+// The EndpointResult reports how the embedding backend was involved.
 type Builder interface {
-	Build(ctx context.Context, req artifacts.BuildRequest) (core.Artifact, bool, error)
+	Build(ctx context.Context, req artifacts.BuildRequest) (core.Artifact, artifacts.EndpointResult, error)
 }
 
 // CrashHook is called at durable-state boundaries; a non-nil return simulates
@@ -91,86 +91,85 @@ const (
 )
 
 // ProcessClaimed processes an already-claimed job and returns its classified
-// outcome plus whether the embedding backend was contacted (so the scheduler's
-// circuit breaker reacts only to real endpoint signals — a superseded, deleted,
-// or fully cache-served job contacts no endpoint). It does NOT retry,
-// dead-letter, or unclaim — the caller owns that. For OutcomeTransient/
-// OutcomePermanent the returned error is the cause. An injected crash returns
-// (0, false, err): a zero Outcome signals the job was left claimed.
-func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, bool, error) {
+// outcome plus how the embedding backend was involved (so the scheduler's
+// circuit breaker reacts only to real endpoint health — independent of any
+// later local catalog error). It does NOT retry, dead-letter, or unclaim — the
+// caller owns that. For OutcomeTransient/OutcomePermanent the returned error is
+// the cause. An injected crash returns (0, ep, err) with a zero Outcome.
+func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, artifacts.EndpointResult, error) {
+	ep := artifacts.EndpointNotContacted
 	if err := w.crash("after-claim"); err != nil {
-		return 0, false, err
+		return 0, ep, err
 	}
 	// Supersession pre-check: a newer desired intent means this claim is stale.
 	// A read error must not be mistaken for supersession (that would drop the
 	// still-claimed job): classify it transient so the caller releases/retries.
 	curGen, curHash, cur, err := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path)
 	if err != nil {
-		return OutcomeTransient, false, err
+		return OutcomeTransient, ep, err
 	}
 	if isSuperseded(curGen, curHash, cur, job) {
-		return OutcomeSuperseded, false, nil
+		return OutcomeSuperseded, ep, nil
 	}
 	if job.Operation == core.OpDelete {
 		if err := w.cat.CommitDelete(ctx, job.WorktreeID, job.Path, job.Generation, job); err != nil {
-			return OutcomeTransient, false, err
+			return OutcomeTransient, ep, err
 		}
-		return OutcomeCommitted, false, nil
+		return OutcomeCommitted, ep, nil
 	}
 	root, repo, err := w.cat.WorktreeInfo(ctx, job.WorktreeID)
 	if err != nil {
-		return OutcomeTransient, false, err
+		return OutcomeTransient, ep, err
 	}
 	fp, err := w.cat.GenerationFingerprint(ctx, repo, job.Generation)
 	if err != nil {
-		return OutcomeTransient, false, err
+		return OutcomeTransient, ep, err
 	}
 	content, err := w.load.Load(ctx, repo, root, job.Path, job.DesiredHash)
 	if err != nil {
-		return OutcomeTransient, false, err
+		return OutcomeTransient, ep, err
 	}
 	key := core.ArtifactKey{RepositoryID: repo, RelativePath: job.Path, SourceHash: job.DesiredHash, Fingerprint: fp}
 
 	var art core.Artifact
 	wholeHit := false
-	contacted := false
 	if existing, ok, gerr := w.cat.GetArtifact(ctx, key); gerr == nil && ok {
 		// Whole-file cache hit: the artifact and its artifact_chunks mapping
 		// already exist; reuse it and commit only the view switch.
 		art, wholeHit = existing, true
 	} else {
-		var built bool
-		art, built, err = w.build.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
-		contacted = built
+		art, ep, err = w.build.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
 		if err != nil {
 			if errors.Is(err, artifacts.ErrDimensionMismatch) {
-				return OutcomePermanent, contacted, err
+				return OutcomePermanent, ep, err
 			}
-			return OutcomeTransient, contacted, err
+			return OutcomeTransient, ep, err
 		}
 	}
+	// From here the endpoint result is fixed: a successful embed (ep) stays the
+	// endpoint signal even if a later local write fails.
 	if err := w.crash("after-build"); err != nil {
-		return 0, contacted, err
+		return 0, ep, err
 	}
 	if !wholeHit {
 		for _, ch := range art.Chunks {
 			if err := w.cat.PutChunkVector(ctx, ch.ChunkID, repo, fp, ch.Vector); err != nil {
-				return OutcomeTransient, contacted, err
+				return OutcomeTransient, ep, err
 			}
 		}
 	}
 	if err := w.crash("after-chunks"); err != nil {
-		return 0, contacted, err
+		return 0, ep, err
 	}
 	// Cheap second supersession guard; the commit's generation + desired_hash
 	// guards are the ultimate safety net, but this avoids a wasted commit and a
 	// visible view flicker when a rapid re-save arrived during the build.
 	curGen2, curHash2, cur2, err := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path)
 	if err != nil {
-		return OutcomeTransient, contacted, err
+		return OutcomeTransient, ep, err
 	}
 	if isSuperseded(curGen2, curHash2, cur2, job) {
-		return OutcomeSuperseded, contacted, nil
+		return OutcomeSuperseded, ep, nil
 	}
 	req := core.CommitRequest{
 		View:     core.ViewEntry{WorktreeID: job.WorktreeID, Path: job.Path, ArtifactID: art.ID, Generation: job.Generation},
@@ -178,9 +177,9 @@ func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, boo
 		Chunks:   art.Chunks, // nil for a whole-file cache hit (mapping already present)
 	}
 	if err := w.cat.CommitUpdate(ctx, req, job); err != nil {
-		return OutcomeTransient, contacted, err
+		return OutcomeTransient, ep, err
 	}
-	return OutcomeCommitted, contacted, nil
+	return OutcomeCommitted, ep, nil
 }
 
 // ProcessOne claims and fully processes the next eligible job, applying durable

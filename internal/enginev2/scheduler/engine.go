@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yoanbernabeu/grepai/internal/enginev2/artifacts"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/worker"
 )
@@ -27,10 +28,10 @@ type Queue interface {
 }
 
 // Processor processes one already-claimed job (satisfied by *worker.Worker).
-// The bool reports whether the embedding backend was contacted, so the circuit
-// breaker reacts only to real endpoint outcomes.
+// The EndpointResult reports how the embedding backend was involved, so the
+// circuit breaker reacts only to real endpoint health.
 type Processor interface {
-	ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, bool, error)
+	ProcessClaimed(ctx context.Context, job core.Job) (worker.Outcome, artifacts.EndpointResult, error)
 }
 
 // Engine is the single host-wide admission-control and pacing layer over the
@@ -149,25 +150,27 @@ func (e *Engine) dispatch(ctx context.Context, job core.Job, release func(), adm
 	e.addInFlight(1)
 	defer e.addInFlight(-1)
 
-	oc, contacted, cause := e.p.ProcessClaimed(ctx, job)
-	e.account(ctx, job, oc, contacted, cause, adm)
+	oc, ep, cause := e.p.ProcessClaimed(ctx, job)
+	e.account(ctx, job, oc, ep, cause, adm)
 }
 
 // account resolves the breaker admission exactly once and disposes of the job.
-// The breaker reacts ONLY to a real endpoint signal: a call that never reached
-// the backend (superseded, delete, fully cache-served, or a pre-build catalog
-// error) resolves as an abort so it can neither trip nor falsely recover the
-// circuit — in particular a half-open probe that made no endpoint call cannot
-// close the breaker. Retry state is keyed by full intent identity (jobKey) so a
-// superseding re-save neither inherits nor erases another intent's attempts.
-func (e *Engine) account(ctx context.Context, job core.Job, oc worker.Outcome, contacted bool, cause error, adm admission) {
-	switch {
-	case !contacted:
-		e.breaker.record(adm, resultAbort)
-	case oc == worker.OutcomeTransient:
+// The breaker reacts ONLY to the endpoint result, independent of the job
+// outcome: a call that never reached the backend (superseded, delete, fully
+// cache-served, or a pre-build catalog error) aborts (so a half-open probe that
+// made no endpoint call can neither trip nor falsely recover the circuit); a
+// successful embed is success even if a later local write fails; only an actual
+// embed availability error is a failure. Retry state is keyed by full intent
+// identity (jobKey) so a superseding re-save neither inherits nor erases another
+// intent's attempts.
+func (e *Engine) account(ctx context.Context, job core.Job, oc worker.Outcome, ep artifacts.EndpointResult, cause error, adm admission) {
+	switch ep {
+	case artifacts.EndpointFailed:
 		e.breaker.record(adm, resultFailure)
-	default: // committed / superseded / permanent that actually reached the endpoint
+	case artifacts.EndpointSucceeded:
 		e.breaker.record(adm, resultSuccess)
+	default: // EndpointNotContacted
+		e.breaker.record(adm, resultAbort)
 	}
 
 	key := jobKey(job)
