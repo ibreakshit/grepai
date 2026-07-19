@@ -82,10 +82,12 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 // invariant 5).
 func (c *Catalog) CommitDelete(ctx context.Context, wt core.WorktreeID, relPath string, gen core.Generation, job core.Job) error {
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		// Key the job delete on the same (worktree, path) as the view delete so
+		// the two can never diverge; job.DesiredHash pins the exact intent.
 		res, err := tx.ExecContext(ctx, `
 			DELETE FROM index_jobs
 			WHERE worktree_id=? AND relative_path=? AND generation<=? AND desired_hash=?`,
-			string(job.WorktreeID), job.Path, int64(gen), job.DesiredHash)
+			string(wt), relPath, int64(gen), job.DesiredHash)
 		if err != nil {
 			return err
 		}
