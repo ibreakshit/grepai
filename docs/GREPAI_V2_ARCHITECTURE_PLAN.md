@@ -459,6 +459,27 @@ Gate 6:
 - representative search and trace results meet the agreed parity threshold
 - dry-run reconciliation identifies only real deltas
 
+**Phase 6 status (import-for-search slice, shipped):** the vector-index import
+and the live search-parity harness are implemented in
+`internal/enginev2/legacyimport` and wired as `grepai v2 migrate` /
+`grepai v2 parity`. Gate 6 for this slice = (1) `Reconcile` matches document and
+chunk-composition counts against a real index — validated live against
+`~/longwave` (27 documents, 261 chunk placements, 0 dangling); (2) mean top-k
+v1-vs-v2 unique-file overlap ≥ threshold on a live run (harness unit-tested;
+live run needs a reachable embedder endpoint + key).
+
+**Import-for-search caveat (by design):** migration reuses v1's stored vectors
+so v2 can search without re-embedding, but v1 embedded framework-transformed
+content that the v2 builder does not replicate. The migrated generation
+therefore carries a distinct, framework-tagged fingerprint
+(`legacyimport.DeriveFingerprint`, which can never collide with
+`runtime.Fingerprint`), and a v2 **native** re-index is a separate generation —
+so the "embedding-disabled reconcile shows idle" property is not claimed for a
+migrated index. Reconciliation compares document + composition counts rather
+than unique vectors, because content-addressing collapses identical-content
+chunks. Symbol-store and RPG-graph import, generation-scoped views, and
+immutable-backup/rollback automation remain deferred (not silently dropped).
+
 ### Phase 7: Production cutover
 
 Procedure:
