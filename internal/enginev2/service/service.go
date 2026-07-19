@@ -1,0 +1,116 @@
+// Package service defines the daemon's request-oriented API (spec §7),
+// independent of the wire transport. Phase 5 implements it against the
+// catalog, reconciler, and scheduler. CLI and MCP become thin clients.
+package service
+
+import (
+	"context"
+
+	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
+)
+
+// RegisterRequest registers a repository or worktree with the daemon.
+type RegisterRequest struct {
+	Root string // canonical filesystem path
+}
+
+// RegisterResponse returns the assigned identities.
+type RegisterResponse struct {
+	RepositoryID core.RepositoryID
+	WorktreeID   core.WorktreeID
+}
+
+// ReconcileRequest requests reconciliation of one worktree.
+type ReconcileRequest struct {
+	WorktreeID core.WorktreeID
+}
+
+// ReconcileResponse reports how many jobs reconciliation produced.
+type ReconcileResponse struct {
+	JobsQueued int
+}
+
+// SearchRequest issues a query within an explicit worktree view (invariant 3:
+// MCP is read/query oriented — this never launches a full scan).
+type SearchRequest struct {
+	WorktreeID core.WorktreeID
+	Query      string
+}
+
+// SearchResponse carries worktree-scoped ranked results plus freshness metadata.
+type SearchResponse struct {
+	WorktreeID       core.WorktreeID
+	Results          []core.SearchHit
+	ActiveGeneration core.Generation
+	Fresh            bool // true when the worktree has no pending index jobs
+}
+
+// TraceRequest issues a call-graph query within an explicit worktree view.
+type TraceRequest struct {
+	WorktreeID core.WorktreeID
+	Symbol     string
+}
+
+// TraceResponse carries call-graph symbols. Symbol extraction is deferred, so
+// this phase always returns an empty Symbols slice.
+type TraceResponse struct {
+	WorktreeID core.WorktreeID
+	Symbols    []string
+}
+
+// StatusRequest asks for indexing/freshness status.
+type StatusRequest struct {
+	WorktreeID core.WorktreeID
+}
+
+// StatusResponse reports indexing/freshness status for a worktree.
+type StatusResponse struct {
+	ActiveGeneration core.Generation
+	Pending          int  // active index jobs for the worktree
+	Fresh            bool // true when Pending == 0
+	DeadLetters      int  // host-wide dead-letter count (coarse this phase)
+}
+
+// WaitFreshRequest waits for selected paths to become fresh with a deadline.
+type WaitFreshRequest struct {
+	WorktreeID core.WorktreeID
+	Paths      []string
+}
+
+// WaitFreshResponse reports whether all requested paths became fresh.
+type WaitFreshResponse struct {
+	Fresh bool
+}
+
+// RebuildRequest starts or cancels a controlled generation rebuild.
+type RebuildRequest struct {
+	RepositoryID core.RepositoryID
+	Cancel       bool
+}
+
+// RebuildResponse reports the rebuild generation.
+type RebuildResponse struct {
+	Generation core.Generation
+}
+
+// DeadLetterRequest inspects, retries, or clears dead-letter work.
+type DeadLetterRequest struct {
+	WorktreeID core.WorktreeID
+}
+
+// DeadLetterResponse lists dead-letter paths.
+type DeadLetterResponse struct {
+	Paths []string
+}
+
+// Service is the daemon's transport-independent API surface.
+type Service interface {
+	Register(ctx context.Context, req RegisterRequest) (RegisterResponse, error)
+	Reconcile(ctx context.Context, req ReconcileRequest) (ReconcileResponse, error)
+	Search(ctx context.Context, req SearchRequest) (SearchResponse, error)
+	Trace(ctx context.Context, req TraceRequest) (TraceResponse, error)
+	Status(ctx context.Context, req StatusRequest) (StatusResponse, error)
+	WaitFresh(ctx context.Context, req WaitFreshRequest) (WaitFreshResponse, error)
+	Rebuild(ctx context.Context, req RebuildRequest) (RebuildResponse, error)
+	DeadLetters(ctx context.Context, req DeadLetterRequest) (DeadLetterResponse, error)
+}
