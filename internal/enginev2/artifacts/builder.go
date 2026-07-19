@@ -69,7 +69,7 @@ func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Arti
 	var (
 		missText []string
 		missByID = map[string]int{} // chunk id -> index into missText (dedup)
-		missOrds []int
+		missOrds = make([]int, 0, len(infos))
 		idByOrd  = make([]string, len(infos))
 	)
 	for i, info := range infos {
