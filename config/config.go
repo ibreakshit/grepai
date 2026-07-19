@@ -27,6 +27,7 @@ const (
 	OpenAIEmbeddingModelLarge       = "text-embedding-3-large"
 	OpenRouterEmbeddingModelLarge   = "openai/text-embedding-3-large"
 	OpenRouterEmbeddingModelQwen8B  = "qwen/qwen3-embedding-8b"
+	OpenRouterEmbeddingModelQwen4B  = "qwen/qwen3-embedding-4b"
 
 	DefaultOllamaEndpoint     = "http://localhost:11434"
 	DefaultLMStudioEndpoint   = "http://127.0.0.1:1234"
@@ -38,6 +39,7 @@ const (
 	DefaultOpenAIDimensions         = 1536
 	DefaultOpenAILargeDimensions    = 3072
 	DefaultQwen8BDimensions         = 4096
+	DefaultQwen4BDimensions         = 2560
 	DefaultOpenAIParallelism        = 4
 
 	DefaultPostgresDSN    = "postgres://localhost:5432/grepai"
@@ -129,6 +131,8 @@ func (e *EmbedderConfig) GetDimensions() int {
 			return DefaultOpenAILargeDimensions
 		case OpenRouterEmbeddingModelQwen8B, "qwen3-embedding-8b":
 			return DefaultQwen8BDimensions
+		case OpenRouterEmbeddingModelQwen4B, "qwen3-embedding-4b":
+			return DefaultQwen4BDimensions
 		default:
 			return DefaultOpenAIDimensions
 		}

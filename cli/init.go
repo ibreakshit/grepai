@@ -40,7 +40,7 @@ This command will:
 
 func init() {
 	initCmd.Flags().StringVarP(&initProvider, "provider", "p", "", "Embedding provider (ollama, lmstudio, openai, synthetic, or openrouter)")
-	initCmd.Flags().StringVarP(&initModel, "model", "m", "", "Embedding model (for openai/openrouter: text-embedding-3-small, text-embedding-3-large; openrouter also supports qwen3-embedding-8b)")
+	initCmd.Flags().StringVarP(&initModel, "model", "m", "", "Embedding model (for openai/openrouter: text-embedding-3-small, text-embedding-3-large; openrouter also supports qwen3-embedding-4b)")
 	initCmd.Flags().StringVarP(&initBackend, "backend", "b", "", "Storage backend (gob, postgres, or qdrant)")
 	initCmd.Flags().BoolVar(&initNonInteractive, "yes", false, "Use defaults without prompting")
 	initCmd.Flags().BoolVar(&initInherit, "inherit", false, "Inherit configuration from main worktree (for git worktrees)")
@@ -162,7 +162,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 				fmt.Println("\nSelect OpenRouter embedding model:")
 				fmt.Println("  1) openai/text-embedding-3-small (1536 dims, fast, recommended)")
 				fmt.Println("  2) openai/text-embedding-3-large (3072 dims, most capable)")
-				fmt.Println("  3) qwen/qwen3-embedding-8b (4096 dims, 32K context, best for code)")
+				fmt.Println("  3) qwen/qwen3-embedding-4b (2560 dims, 32K context, best for code)")
 				fmt.Print("Choice [1]: ")
 
 				modelInput, _ := reader.ReadString('\n')
@@ -172,7 +172,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 				case "2":
 					cfg.Embedder.Model = "openai/text-embedding-3-large"
 				case "3":
-					cfg.Embedder.Model = "qwen/qwen3-embedding-8b"
+					cfg.Embedder.Model = "qwen/qwen3-embedding-4b"
 				default:
 					cfg.Embedder.Model = "openai/text-embedding-3-small"
 				}
@@ -361,6 +361,8 @@ func resolveInitModel(provider, requestedModel string) string {
 		switch requestedModel {
 		case "text-embedding-3-large":
 			return config.OpenRouterEmbeddingModelLarge
+		case "qwen3-embedding-4b":
+			return config.OpenRouterEmbeddingModelQwen4B
 		case "qwen3-embedding-8b":
 			return config.OpenRouterEmbeddingModelQwen8B
 		case "text-embedding-3-small", "":
