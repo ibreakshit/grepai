@@ -78,7 +78,14 @@ func Open(ctx context.Context, catalogPath, root string, emb embedder.Embedder, 
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(catalogPath), 0o750); err != nil {
+	dataDir := filepath.Dir(catalogPath)
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return nil, err
+	}
+	// Self-ignore the data directory so reconciliation never indexes the v2
+	// catalog's own files (a nested .gitignore of "*" is honored by git's
+	// --exclude-standard untracked scan even if the repo root does not list it).
+	if err := ensureSelfIgnore(dataDir); err != nil {
 		return nil, err
 	}
 	cat, err := sqlite.Open(ctx, catalogPath)
@@ -140,3 +147,13 @@ func (e *Engine) Search(ctx context.Context, query string) ([]core.SearchHit, co
 
 // Close releases the catalog.
 func (e *Engine) Close() error { return e.cat.Close() }
+
+// ensureSelfIgnore writes a "*"-gitignore into dir if absent, so nothing in the
+// v2 data directory is ever indexed.
+func ensureSelfIgnore(dir string) error {
+	path := filepath.Join(dir, ".gitignore")
+	if _, err := os.Stat(path); err == nil {
+		return nil // already present; do not clobber operator edits
+	}
+	return os.WriteFile(path, []byte("*\n"), 0o600)
+}
