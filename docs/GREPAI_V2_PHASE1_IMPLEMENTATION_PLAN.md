@@ -18,7 +18,7 @@
 - **`make test` runs `go test -race ./...`** — all tests pass under the race detector, including concurrent isolation tests.
 - **`make lint` (golangci-lint v1.64.2) must stay green**; code `gofmt`-clean. gosec is enabled (annotate justified findings with `// #nosec GXXX - reason`, house style per `updater.go`); `_test.go` files are excluded from gosec/errcheck by `.golangci.yml`.
 - Conventional commits, scope `enginev2` or `catalog`. Never push to `main`; work on the current feature branch.
-- SQLite driver is **`modernc.org/sqlite`** (driver name `"sqlite"`, blank-imported for side effects). Open in **WAL** mode with `busy_timeout` and `foreign_keys` ON. All writes serialized via `writeMu`.
+- SQLite driver is **`modernc.org/sqlite` pinned at `v1.45.0`** (driver name `"sqlite"`, blank-imported for side effects). **Do NOT use `@latest`**: v1.46.2+ require **go 1.25.0**, which would bump the module's `go` directive off the 1.24.2 floor. v1.45.0 is the newest release whose `go` directive stays `1.24.2`; it is verified to build under `CGO_ENABLED=0` on host go 1.24.2 and to open a WAL DB with `foreign_keys` ON and round-trip a BLOB. Open in **WAL** mode with `busy_timeout` and `foreign_keys` ON. All writes serialized via `writeMu`.
 - Vectors are stored as **little-endian float32 blobs** whose byte length MUST equal `dimensions*4`; validate on write and read (invariant 10: fingerprint correctness; never load a mis-dimensioned vector).
 - Artifact cache lookups are **repository-scoped and fingerprint-exact** — a differing fingerprint MUST NOT return a cache hit (Gate 1).
 
@@ -66,13 +66,13 @@ internal/enginev2/catalog/sqlite/
 - Consumes: nothing from later tasks.
 - Produces: `type Catalog struct{...}`; `func Open(ctx context.Context, path string) (*Catalog, error)`; `func (c *Catalog) Close() error`; unexported `func (c *Catalog) withWriteTx(ctx context.Context, fn func(*sql.Tx) error) error`; `db *sql.DB` and `writeMu sync.Mutex` fields. Later tasks add methods on `*Catalog`.
 
-- [ ] **Step 1: Add the dependency**
+- [ ] **Step 1: Add the dependency (pinned)**
 
 Run:
 ```bash
-GOFLAGS=-mod=mod go get modernc.org/sqlite@latest
+GOFLAGS=-mod=mod go get modernc.org/sqlite@v1.45.0
 ```
-Expected: `go.mod`/`go.sum` updated with `modernc.org/sqlite` and its indirect deps.
+Expected: `go.mod`/`go.sum` updated with `modernc.org/sqlite v1.45.0` and its deps; the `go` directive stays `go 1.24.2`. **Never `@latest`** — v1.46.2+ require go 1.25.0. (In this branch the dependency is already present in `go.mod`/`go.sum` from planning; if so, leave it and skip the `go get`.) After the catalog code imports it, it becomes a direct dependency; a later `go mod tidy` will drop the `// indirect` comment — that is expected.
 
 - [ ] **Step 2: Write the failing test**
 
