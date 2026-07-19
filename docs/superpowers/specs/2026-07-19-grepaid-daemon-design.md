@@ -2,6 +2,7 @@
 
 **Date:** 2026-07-19
 **Status:** Approved (design)
+**Code-verified:** 2026-07-19 — every §3 anchor and the §4.4 interface union checked against the tree; no signature collisions. Findings folded into §2, §4.2–§4.6, §7, §8.
 **Scope:** Build the `grepaid` host daemon, the Unix-socket JSON-RPC transport, a per-repo catalog substrate (`catalogset` + registry), a solid **lazy-start** lifecycle (no systemd), and engine-gated CLI thin clients. This lands the daemon slice deferred across Phases 4/5 of `docs/GREPAI_V2_ARCHITECTURE_PLAN.md` (the "TIGHT scope" decision).
 
 ## 1. Objective
@@ -17,6 +18,7 @@ A single `grepaid` process serves every registered repository, but each reposito
 - `scheduler.Engine` takes an injected `scheduler.Queue`.
 - `service.Server` takes an injected `service.Catalog`.
 - `worker.Worker` / `artifacts` builder take an injected catalog (the durable commit surface).
+- `reconcile.Engine` takes an injected `reconcile.CatalogReader`, and `Reconcile(ctx, wt)` is worktree-parameterized — one reconciler instance serves every repo through the catalogset.
 
 We add one adapter, `catalogset`, that owns `map[RepositoryID]*sqlite.Catalog` and implements the **union** of those catalog-facing interfaces by routing per-repo calls to the right catalog and fanning out the host-wide aggregate calls. The scheduler still sees a single logical queue and enforces a single global in-flight budget (invariant 2: one host, one scheduler) — the budget lives in the scheduler's semaphores, not in any DB.
 
@@ -29,7 +31,7 @@ Rationale (vs. a single merged catalog):
 - **Natural lifecycle/portability** — the index lives in the repo's `.grepai/`, travels with it, and is removed with it.
 - A merged catalog would buy nothing on cross-repo embedding dedup: chunk-vector cache identity already includes the `repository_id` namespace (§5.3), so identical text in two repos re-embeds either way.
 
-**Cost we accept:** cross-repo / workspace search is a query-time fan-out (query each member repo's catalog, merge-rank) rather than one SQL query. The `catalogset` already fans out for aggregates, so this is a merge step, not new plumbing — but it is deferred (§11).
+**Cost we accept:** cross-repo / workspace search is a query-time fan-out (query each member repo's catalog, merge-rank) rather than one SQL query. The `catalogset` already fans out for aggregates, so this is a merge step, not new plumbing — but it is deferred (§9).
 
 ## 3. What already exists (do not rebuild)
 
@@ -94,29 +96,36 @@ There is no service manager. The daemon is **spawned on demand** by the first cl
 3. Unlink a stale socket if present (safe: we hold the lock), then `net.Listen("unix", …)`, socket mode 0600.
 4. Load `daemon.json` (+ `GREPAID_*` env); build the host-global embedder + fingerprint (§4.3).
 5. Load `registry.json`; open each registered repo's catalog into the `catalogset` (skip + log a repo whose dir is gone or whose catalog fails the fingerprint/schema guard — §4.3/§4.6).
-6. Assemble the single `worker.Worker` (Processor; builder + committer route through the catalogset) + `scheduler.Engine` (`daemon.json`, defaults from `scheduler.DefaultConfig()`) + `service.Server` (Catalog = catalogset).
+6. Assemble the single `worker.Worker` (Processor; commits route through the catalogset, builds through the per-repo builder router — §4.4) + `scheduler.Engine` (`daemon.json`, defaults from `scheduler.DefaultConfig()`) + `service.Server` (Catalog = catalogset, Reconciler = one `reconcile.Engine` over the catalogset).
 7. `go scheduler.Run(ctx)`; `go rpc.Server.Serve(listener)`.
 8. Block on SIGINT/SIGTERM. On signal: stop accepting, cancel the scheduler ctx (drains in-flight via its WaitGroup), close the listener, close all catalogs, persist the registry, remove the socket, release the lock. Exit 0.
 
 **Why this is solid (the race analysis):** the flock — not the socket file — is the single source of truth. Two clients that both observe "down" and both spawn `grepaid` produce two processes; exactly one wins the flock and listens, the other exits 0 at step 2. Both clients are merely polling the socket, which the winner creates, so both connect. A crashed daemon releases its flock (OS-guaranteed) and leaves a stale socket; the next client's spawn wins the freed lock, unlinks the stale socket, and relistens. No orphaned lock, no double-bind, no lost writes (jobs are durable in the catalogs).
 
-The daemon stays resident (indexing keeps draining in the background). If it crashes between commands, the next `grepai v2 …` transparently respawns it. Idle auto-exit is out of scope (§11).
+The daemon stays resident (indexing keeps draining in the background). If it crashes between commands, the next `grepai v2 …` transparently respawns it. Idle auto-exit is out of scope (§9).
 
 ### 4.3 Embedder, fingerprint & host config (`daemon.json`)
 
 Global daemon settings live host-wide in `<state>/grepai/daemon.json`, **not** in any repo's `.grepai/config.yaml` (a host daemon has no single owning repo). Fields: embedder (provider/endpoint/model/dimensions), scheduler tuning (overrides `scheduler.DefaultConfig()`), and an optional socket override. Every field is overridable by a `GREPAID_*` env var (e.g. `GREPAID_SOCKET`, `GREPAID_EMBEDDER_ENDPOINT`). Defaults target the current 4B embedder. A first run with no `daemon.json` writes one with defaults.
 
-The daemon uses **one host-global embedder + indexing fingerprint** derived from `daemon.json`. Every repo is registered/indexed under that fingerprint; per-repo DBs keep the data isolated regardless. On opening a repo catalog whose active generation carries a *different* fingerprint, the daemon does **not** hard-error like interactive `runtime.Open` — it logs and starts a fresh generation under the daemon's fingerprint on next reconcile (a background service must not wedge on one stale repo). Matching-fingerprint catalogs are reused as-is.
+The daemon uses **one host-global embedder + indexing fingerprint** derived from `daemon.json`. Every repo is registered/indexed under that fingerprint; per-repo DBs keep the data isolated regardless. On opening a repo catalog whose active generation carries a *different* fingerprint, the daemon does **not** hard-error like interactive `runtime.Open` — it logs and rolls the repo forward (a background service must not wedge on one stale repo). Pinned sequence: `CreateGeneration(active+1, daemonFP)` → `SetActiveGeneration` (both exist in the sqlite catalog) → the next reconcile enqueues under the new generation. That repo's results are transiently empty until reindexed — correct, not a regression: the old vectors are unrankable against queries embedded by the daemon's embedder, and per-generation views keep the mismatched dimensions out of ranking. (The daemon's reconcile retires old-generation jobs per path via `UpsertJob` supersession, rather than `runtime.Index`'s `DeleteJobsForWorktree` pre-clear.) Matching-fingerprint catalogs are reused as-is.
 
-**Deferred (natural next refinement):** honoring each repo's *own* config embedder/fingerprint — per-repo DBs already make this natural for storage; it additionally needs a per-repo embedder router in the Processor and in query embedding (§11).
+**Deferred (natural next refinement):** honoring each repo's *own* config embedder/fingerprint — per-repo DBs already make this natural for storage; it additionally needs a per-repo embedder router in the Processor and in query embedding (§9).
 
 ### 4.4 catalogset + registry
 
-- `catalogset` (new, `internal/enginev2/…`): owns `map[RepositoryID]*sqlite.Catalog` under a mutex. Implements the union of the catalog-facing interfaces — `scheduler.Queue`, `service.Catalog`, and the `worker`/`artifacts` commit surface (verify the exact method sets in Phase 0; route each per-repo method by its repo/worktree/job/artifact id).
-  - **Routing methods** delegate to the target repo's catalog. An op for an unregistered repo is an error, never a silent cross-repo write.
-  - **Aggregate methods** (`RepositoriesWithPendingJobs`, `QueueDepthByPriority`, `DeadLetterCount`) fan out over the open catalogs and combine.
-  - `Register(repo, root)` opens/creates that repo's catalog and adds it; `Close()` closes all.
-- `registry` (new): `registry.json`, atomic write (temp + rename). Each entry (borrowing claude-mem's `chroma-sync-state.json`) carries `{repositoryID, root, catalogPath, activeGeneration, lastReconciledAt, pendingCount}` so `grepai daemon status` and restart re-open are cheap and don't require opening every catalog first. Loaded at startup, updated on register/reconcile. Worktree→repo id derives from the canonical root/git-common-dir exactly as `service.Server.Register` does today.
+- `catalogset` (new, `internal/enginev2/…`): owns `map[RepositoryID]*sqlite.Catalog` under a mutex. Implements the union of the **four** catalog-facing interfaces — `scheduler.Queue`, `service.Catalog`, `worker.Catalog`, and `reconcile.CatalogReader` (~25 distinct methods; pre-verified 2026-07-19: the five names shared across them — `UpsertJob`, `DeadLetterJob`, `WorktreeInfo`, `GenerationFingerprint`, `ActiveGeneration` — carry identical signatures, so one type satisfies all four).
+  - **Routing methods** delegate to the target repo's catalog, keyed by an explicit repo id or — since `core.Job` and most service calls carry only a `WorktreeID` — via an internal worktree→repo map (learned at `RegisterWorktree`, rehydrated from `registry.json` at startup; today wt == repo == canonical root, but keep the map explicit). An op for an unregistered repo/worktree is an error, never a silent cross-repo write.
+  - **Aggregate methods** (`RepositoriesWithPendingJobs`, `QueueDepthByPriority`, `DeadLetterCount`, `RequeueClaimedJobs`) fan out over the open catalogs and combine.
+  - `worker.Catalog.ClaimNextJob` (host-wide, no repo arg) is implemented as a fan-out claim for interface completeness only — the daemon path never calls it (the scheduler claims per-repo via `ClaimNextJobInRepo` and calls `ProcessClaimed` directly).
+  - **Builder router** (companion type): `artifacts.ChunkCache.GetChunkVector(chunkID)` carries no repo id, so chunk-cache reads *cannot* route through the catalogset. A routing `worker.Builder` dispatches by `BuildRequest.Key.RepositoryID` to a per-repo `artifacts.DefaultBuilder`, each holding that repo's catalog as its `ChunkCache`.
+  - `Register(repo, root)` opens/creates that repo's catalog (and its builder) and adds both; `Close()` closes all.
+- `registry` (new): `registry.json`, atomic write (temp + rename, fsync temp + parent dir). Each entry (borrowing claude-mem's `chroma-sync-state.json`) carries `{repositoryID, root, catalogPath, activeGeneration, lastReconciledAt, pendingCount}` so `grepai daemon status` and restart re-open are cheap and don't require opening every catalog first. Loaded at startup, updated on register/reconcile. Worktree→repo id derives from the canonical root/git-common-dir exactly as `service.Server.Register` does today.
+
+**Phase B obligations surfaced by the Phase 0 independent review (do not lose):**
+- **Catalog quarantine / aggregate isolation.** `catalogset`'s fan-out aggregates (`RepositoriesWithPendingJobs`, `QueueDepthByPriority`, `DeadLetterCount`, `RequeueClaimedJobs`) fail fast on the first catalog error. Because the scheduler calls `RepositoriesWithPendingJobs` before every claim, one persistently-erroring catalog would stall **all** repos — contradicting the per-repo blast-radius promise. Phase B must quarantine a repeatedly-failing catalog (remove it from the live set, surface it in `status`/logs, keep serving the rest) rather than letting its error propagate through the aggregate.
+- **Registry write-serialization.** `Registry.Upsert`+`Save` are not internally synchronized; the daemon must serialize registry mutations (single owner goroutine or a mutex) since register/reconcile updates can race.
+- **Per-repo builder assembly.** Phase B builds one `artifacts.DefaultBuilder` per repo via `Set.ChunkCache(repo)` (shares the open handle) and registers each in the `BuilderRouter` — never a second `sqlite.Open` of the same file.
 
 ### 4.5 RPC transport (`internal/enginev2/rpc/`)
 
@@ -126,7 +135,7 @@ The daemon uses **one host-global embedder + indexing fingerprint** derived from
 
 ### 4.6 Catalog schema guard (light)
 
-Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for this slice: the daemon checks each opened catalog's schema version and **refuses (skips + logs) a catalog newer than the binary understands**, rather than risking corruption. Older-but-current schemas are used as-is; a full migration framework + pre-migration `backups/` snapshots are deferred (§11) — noted here so the long-lived multi-version daemon has a guardrail from day one.
+Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for this slice: the daemon checks each opened catalog's schema version and **refuses (skips + logs) a catalog newer than the binary understands**, rather than risking corruption. The stamp already exists — the sqlite catalog records applied migrations in `schema_migrations` — but its readers are unexported; Phase 0 adds a small exported accessor (e.g. `sqlite.Catalog.SchemaVersion(ctx)`) for the guard to compare against the binary's supported version. Older-but-current schemas are used as-is; a full migration framework + pre-migration `backups/` snapshots are deferred (§9) — noted here so the long-lived multi-version daemon has a guardrail from day one.
 
 ## 5. CLI clients (`cli/`, gated)
 
@@ -152,16 +161,16 @@ Borrowing claude-mem's explicit `schema_versions` discipline, but minimal for th
 
 ## 7. Testing
 
-- **catalogset unit:** routes per repo; aggregates union/sum; unregistered-repo op errors; race-clean.
+- **catalogset unit:** routes per repo (incl. the worktree→repo map rehydrated from a registry snapshot); aggregates union/sum; builder router dispatches to the right repo's cache; unregistered-repo/worktree op errors; race-clean.
 - **registry unit:** round-trip load/save; atomic temp+rename; append/update; corrupt/missing handling.
 - **rpc unit:** frame round-trip; partial reads and multiple frames in one buffer; each error code; id-correlation across interleaved ids; no-id notification → no response; panic-in-handler recovered.
-- **daemon integration:** real socket + two tmp git fixtures. Register both; reconcile; `waitFresh(deadline)`; `search` in each returns that repo's hit and **not** the other's (isolation guardrail); `status` fresh; `DeadLetterCount` aggregates. **Lazy-start:** with no daemon, an `ensureDaemon` call spawns one and connects; two concurrent `ensureDaemon` calls yield exactly one live daemon (flock race); killing the daemon and calling again respawns it with no orphaned lock/socket. SIGTERM drains, exits 0, registry persisted.
+- **daemon integration:** real socket + two tmp git fixtures. Register both; reconcile; `waitFresh(deadline)`; `search` in each returns that repo's hit and **not** the other's (isolation guardrail); `status` fresh; `DeadLetterCount` aggregates. **Lazy-start:** with no daemon, an `ensureDaemon` call spawns one and connects; two concurrent `ensureDaemon` calls yield exactly one live daemon (flock race); killing the daemon and calling again respawns it with no orphaned lock/socket. SIGTERM drains, exits 0, registry persisted. A repo whose catalog carries a mismatched fingerprint rolls to a fresh generation and reindexes (transiently empty, then fresh hits — §4.3); a catalog stamped with a newer schema version is skipped with a log while the daemon serves the rest.
 - **cli:** `engine:v1` unchanged (asserts no daemon dial); `engine:v2` with spawn-failure falls back to v1 (top-level); `grepai daemon status` against a running fixture.
 - **gates per phase:** `make build`, `make lint`, `go test ./... -race`, `go vet`, `gofmt` green. Independent `codex-bg` review before advancing.
 
 ## 8. Sequenced phases (one spec)
 
-- **Phase 0 — Multi-repo substrate:** `catalogset` (union of `scheduler.Queue` + `service.Catalog` + commit surface) + `registry` + schema-version guard + tests. Isolated. Gate 0.
+- **Phase 0 — Multi-repo substrate:** `catalogset` (four-interface union — §4.4 — incl. the worktree→repo routing map) + per-repo builder router + `registry` + exported schema-version accessor + guard + tests. Isolated. Gate 0.
 - **Phase A — RPC transport:** `rpc/server.go` + `rpc/client.go` (+ `Dial` daemon-down detection) + tests. Isolated. Gate A.
 - **Phase B — Daemon process + lazy-start:** `cmd/grepaid/main.go` (paths, `daemon.json`, flock singleton + race handling, listen, load registry + open catalogs, wire embedder/scheduler/service, background scheduler, graceful shutdown) + `ensureDaemon` spawn helper + integration test. Gate B.
 - **Phase C — CLI clients:** config `Engine`/`Daemon.Socket` + `grepai daemon start|stop|status` + `v2 search/status/watch` via `ensureDaemon` + gated top-level fallback + `init` ensure-registered. Gate C.
