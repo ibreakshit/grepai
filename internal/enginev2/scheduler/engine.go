@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"math/rand"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,7 +51,7 @@ type Engine struct {
 	attempts map[string]int
 	depth    map[core.Priority]int
 	inFlight int
-	rrCursor int
+	lastRepo core.RepositoryID // round-robin resume point (by identity, not index)
 }
 
 var _ Scheduler = (*Engine)(nil)
@@ -100,10 +102,10 @@ func (e *Engine) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		// Circuit gate. When open+elapsed, Allow transitions to half-open and
-		// returns true exactly once (the probe). When not allowed, release the
-		// slot and wait for the probe interval or a wake.
-		if !e.breaker.Allow() {
+		// Circuit gate. When open+elapsed, Allow grants a single half-open probe.
+		// When not admitted, release the slot and wait for the probe interval.
+		adm := e.breaker.Allow()
+		if !adm.ok {
 			release()
 			if !e.waitBackoff(ctx) {
 				return ctx.Err()
@@ -113,9 +115,9 @@ func (e *Engine) Run(ctx context.Context) error {
 
 		job, ok, cerr := e.claimRoundRobin(ctx)
 		if cerr != nil || !ok {
-			// Consumed a probe token but have no work to dispatch: don't wedge
-			// the breaker half-open.
-			e.breaker.abortProbe()
+			// Admission granted but no work to dispatch: resolve the token so a
+			// probe never wedges the breaker half-open.
+			e.breaker.record(adm, resultAbort)
 			release()
 			if cerr != nil {
 				// Transient read error: back off briefly, then retry the loop.
@@ -131,13 +133,14 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 
 		e.wg.Add(1)
-		go e.dispatch(ctx, job, release)
+		go e.dispatch(ctx, job, release, adm)
 	}
 }
 
-// dispatch processes one claimed job, accounts the outcome, releases the slot,
-// and wakes the loop. Runs in its own goroutine.
-func (e *Engine) dispatch(ctx context.Context, job core.Job, release func()) {
+// dispatch processes one claimed job, accounts the outcome (resolving its
+// breaker admission), releases the slot, and wakes the loop. Runs in its own
+// goroutine.
+func (e *Engine) dispatch(ctx context.Context, job core.Job, release func(), adm admission) {
 	defer e.wg.Done()
 	defer e.wake()
 	defer release()
@@ -145,33 +148,49 @@ func (e *Engine) dispatch(ctx context.Context, job core.Job, release func()) {
 	defer e.addInFlight(-1)
 
 	oc, cause := e.p.ProcessClaimed(ctx, job)
-	e.account(ctx, job, oc, cause)
+	e.account(ctx, job, oc, cause, adm)
 }
 
-// account applies the outcome: circuit accounting, retry scheduling with
-// backoff, and dead-lettering after bounded attempts.
-func (e *Engine) account(ctx context.Context, job core.Job, oc worker.Outcome, cause error) {
+// account applies the outcome: it resolves the breaker admission exactly once,
+// schedules retry-with-backoff, and dead-letters after bounded attempts. Retry
+// state is keyed by the full intent identity (jobKey) so a superseding re-save
+// neither inherits nor erases another intent's attempt count.
+func (e *Engine) account(ctx context.Context, job core.Job, oc worker.Outcome, cause error, adm admission) {
 	key := jobKey(job)
 	switch oc {
 	case worker.OutcomeCommitted, worker.OutcomeSuperseded:
-		e.breaker.RecordSuccess()
+		e.breaker.record(adm, resultSuccess)
 		e.clearAttempts(key)
 	case worker.OutcomePermanent:
-		// A shape error is not an endpoint-availability signal; leave the breaker.
+		// A definitive answer proves the endpoint is reachable (not an
+		// availability failure): resolve the admission as success.
+		e.breaker.record(adm, resultSuccess)
+		if err := e.q.DeadLetterJob(ctx, job, "permanent: "+errMsg(cause)); err != nil {
+			// The terminal write failed (durable-store I/O): the job is still
+			// claimed. Re-attempt the terminal transition later instead of
+			// leaving it silently stuck; keep the attempt state.
+			e.scheduleRetry(ctx, job, 1)
+			return
+		}
 		e.clearAttempts(key)
-		_ = e.q.DeadLetterJob(ctx, job, "permanent: "+errMsg(cause))
 	case worker.OutcomeTransient:
-		e.breaker.RecordFailure()
+		e.breaker.record(adm, resultFailure)
 		n := e.incAttempts(key)
 		if n >= e.cfg.MaxJobAttempts {
+			if err := e.q.DeadLetterJob(ctx, job, "attempts exhausted: "+errMsg(cause)); err != nil {
+				// Terminal write failed: re-attempt later, keep the attempt state.
+				e.scheduleRetry(ctx, job, n)
+				return
+			}
 			e.clearAttempts(key)
-			_ = e.q.DeadLetterJob(ctx, job, "attempts exhausted: "+errMsg(cause))
 			return
 		}
 		e.scheduleRetry(ctx, job, n)
 	default:
-		// Unclassified (injected crash): leave the job claimed; a restart's
-		// worker.Recover requeues it. No circuit accounting.
+		// Unclassified (injected crash): resolve the admission as an abort so a
+		// probe never wedges, and leave the job claimed for a restart's
+		// worker.Recover to requeue.
+		e.breaker.record(adm, resultAbort)
 	}
 }
 
@@ -204,9 +223,10 @@ func (e *Engine) dispatchWhenReady(ctx context.Context, job core.Job) {
 		if err != nil {
 			return
 		}
-		if e.breaker.Allow() {
+		adm := e.breaker.Allow()
+		if adm.ok {
 			e.wg.Add(1)
-			e.dispatch(ctx, job, release)
+			e.dispatch(ctx, job, release, adm)
 			return
 		}
 		release()
@@ -259,6 +279,10 @@ func (e *Engine) acquireIndex(ctx context.Context) (func(), error) {
 	}
 }
 
+// claimRoundRobin claims one job, resuming after the last repository served (by
+// identity, not index) so a repo cannot be starved by others being inserted or
+// removed from the sorted pending set between claims. RepositoriesWithPendingJobs
+// returns repos sorted ascending.
 func (e *Engine) claimRoundRobin(ctx context.Context) (core.Job, bool, error) {
 	repos, err := e.q.RepositoriesWithPendingJobs(ctx)
 	if err != nil {
@@ -268,8 +292,17 @@ func (e *Engine) claimRoundRobin(ctx context.Context) (core.Job, bool, error) {
 		return core.Job{}, false, nil
 	}
 	e.mu.Lock()
-	start := e.rrCursor
+	last := e.lastRepo
 	e.mu.Unlock()
+	// Start at the first repo strictly greater than the last one served; if none
+	// is greater (last was the max, or was removed past the end), wrap to 0.
+	start := 0
+	for i, r := range repos {
+		if r > last {
+			start = i
+			break
+		}
+	}
 	for i := 0; i < len(repos); i++ {
 		idx := (start + i) % len(repos)
 		job, ok, err := e.q.ClaimNextJobInRepo(ctx, repos[idx], core.PriorityBootstrap)
@@ -278,7 +311,7 @@ func (e *Engine) claimRoundRobin(ctx context.Context) (core.Job, bool, error) {
 		}
 		if ok {
 			e.mu.Lock()
-			e.rrCursor = (idx + 1) % len(repos)
+			e.lastRepo = repos[idx]
 			e.mu.Unlock()
 			return job, true, nil
 		}
@@ -350,7 +383,18 @@ func (e *Engine) clearAttempts(key string) {
 	e.mu.Unlock()
 }
 
-func jobKey(j core.Job) string { return string(j.WorktreeID) + "\x00" + j.Path }
+// jobKey identifies a job by its full desired-intent (worktree, path,
+// generation, desired hash, operation), so retry/attempt state for one intent
+// is never inherited or erased by a superseding re-save of the same path.
+func jobKey(j core.Job) string {
+	return strings.Join([]string{
+		string(j.WorktreeID),
+		j.Path,
+		strconv.FormatInt(int64(j.Generation), 10),
+		j.DesiredHash,
+		strconv.Itoa(int(j.Operation)),
+	}, "\x00")
+}
 
 func errMsg(err error) string {
 	if err == nil {

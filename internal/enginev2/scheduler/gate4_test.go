@@ -262,6 +262,7 @@ func TestGate4_EndpointDownCircuitBounds(t *testing.T) {
 	// The breaker opens after CircuitOpenAfter consecutive transient failures.
 	waitUntil(t, 3*time.Second, func() bool { return e.Stats().Circuit == "open" })
 	callsAtOpen := cp.count()
+	embAtOpen := emb.EmbedCalls()
 
 	// The scheduler loop must NOT have exited (no daemon restart).
 	select {
@@ -274,11 +275,14 @@ func TestGate4_EndpointDownCircuitBounds(t *testing.T) {
 		t.Fatalf("unbounded calls before open: %d", callsAtOpen)
 	}
 
-	// A single probe fires per probe interval; the still-down endpoint re-opens.
+	// Exactly one probe (one real embed call) fires per probe interval; the
+	// still-down endpoint re-opens.
 	clk.Advance(cfg.CircuitProbeInterval)
-	waitUntil(t, 3*time.Second, func() bool { return cp.count() > callsAtOpen })
-	if cp.count() > callsAtOpen+2 {
-		t.Fatalf("probe storm: %d calls after one interval", cp.count())
+	waitUntil(t, 3*time.Second, func() bool { return emb.EmbedCalls() > embAtOpen })
+	// Give any erroneous extra probe a chance to slip through, then assert exactly one.
+	time.Sleep(50 * time.Millisecond)
+	if got := emb.EmbedCalls() - embAtOpen; got != 1 {
+		t.Fatalf("want exactly one probe embed call per interval, got %d", got)
 	}
 	waitUntil(t, 3*time.Second, func() bool { return e.Stats().Circuit == "open" })
 
