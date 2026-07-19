@@ -7,6 +7,13 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
 
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // seedGeneration creates and activates a generation with a fingerprint on top
 // of the repo/worktree registered by seedRepoWorktree (defined in views_test.go).
 func seedGeneration(t *testing.T, c *Catalog, repo core.RepositoryID, gen core.Generation, fp string) {
@@ -63,15 +70,82 @@ func TestCommitDeleteRemovesView(t *testing.T) {
 		View:     core.ViewEntry{WorktreeID: "w", Path: "a.go", ArtifactID: "art-1", Generation: 1},
 		Artifact: core.Artifact{ID: "art-1", Key: core.ArtifactKey{RepositoryID: "r", RelativePath: "a.go", SourceHash: "h1", Fingerprint: "fp"}, Dimensions: 3},
 	}
-	if err := c.CommitUpdate(ctx, req, core.Job{WorktreeID: "w", Path: "a.go", Generation: 1, Operation: core.OpUpsert}); err != nil {
+	if err := c.CommitUpdate(ctx, req, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert}); err != nil {
 		t.Fatal(err)
 	}
-	del := core.Job{WorktreeID: "w", Path: "a.go", Generation: 2, Operation: core.OpDelete}
-	if err := c.CommitDelete(ctx, "w", "a.go", 2, del); err != nil {
+	// A delete job must exist for CommitDelete to fulfill (mirrors the worker,
+	// which only calls CommitDelete for a claimed OpDelete job).
+	del := core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "", Generation: 1, Operation: core.OpDelete, Priority: core.PriorityReconcile}
+	if err := c.UpsertJob(ctx, del); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CommitDelete(ctx, "w", "a.go", 1, del); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := c.ResolveView(ctx, "w", "a.go"); err != nil || ok {
 		t.Fatalf("view should be gone: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestCommitDeleteSupersededKeepsNewerUpsert(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "r", "w")
+	seedGeneration(t, c, "r", 1, "fp")
+	// A delete job is claimed, then the file is re-created (same generation,
+	// non-empty desired hash) — the row is overwritten to an upsert.
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "", Generation: 1, Operation: core.OpDelete, Priority: core.PriorityReconcile}))
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h9", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	// The stale delete must not drop the newer upsert.
+	del := core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "", Generation: 1, Operation: core.OpDelete}
+	if err := c.CommitDelete(ctx, "w", "a.go", 1, del); err != nil {
+		t.Fatal(err)
+	}
+	gen, hash, ok, err := c.CurrentJob(ctx, "w", "a.go")
+	if err != nil || !ok || gen != 1 || hash != "h9" {
+		t.Fatalf("newer upsert must survive: gen=%d hash=%q ok=%v err=%v", gen, hash, ok, err)
+	}
+}
+
+func TestDeadLetterSupersededKeepsNewerUpsert(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "r", "w")
+	seedGeneration(t, c, "r", 1, "fp")
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	// Re-save supersedes h1 with h2 (same generation).
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h2", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	// A dead-letter for the stale h1 must not drop h2 or record a dead-letter.
+	if err := c.DeadLetterJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1}, "stale permanent"); err != nil {
+		t.Fatal(err)
+	}
+	if dlc, _ := c.DeadLetterCount(ctx); dlc != 0 {
+		t.Fatalf("stale dead-letter must not record: dlc=%d", dlc)
+	}
+	_, hash, ok, err := c.CurrentJob(ctx, "w", "a.go")
+	if err != nil || !ok || hash != "h2" {
+		t.Fatalf("newer upsert must survive dead-letter: hash=%q ok=%v err=%v", hash, ok, err)
+	}
+}
+
+func TestFailJobAttemptSupersededIsNoop(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "r", "w")
+	seedGeneration(t, c, "r", 1, "fp")
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h2", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	// A stale h1 transient failure must not charge an attempt against h2.
+	att, err := c.FailJobAttempt(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if att != 0 {
+		t.Fatalf("stale attempt must report the untouched newer count 0, got %d", att)
+	}
+	job, ok, err := c.ClaimNextJob(ctx, core.PriorityBootstrap)
+	if err != nil || !ok || job.DesiredHash != "h2" || job.Attempts != 0 {
+		t.Fatalf("h2 must be intact: hash=%q attempts=%d ok=%v err=%v", job.DesiredHash, job.Attempts, ok, err)
 	}
 }
 

@@ -71,22 +71,35 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 	return err
 }
 
-// CommitDelete atomically removes a worktree's view of a path and deletes the
-// job, guarded so a newer generation (view or job) is never clobbered by a
-// stale delete (spec §5.6). The artifact itself is retained (it may still be
-// referenced by other worktrees; invariant 5).
+// CommitDelete atomically fulfills a delete job: it removes the exact job row
+// (same generation and desired hash — an OpDelete carries an empty desired
+// hash) and, only if that job was still present, removes the worktree view. If
+// a newer desired intent superseded the delete (e.g. the file was re-created,
+// replacing the row with an OpUpsert whose desired hash differs), the job
+// delete matches nothing and the view is left untouched so the surviving upsert
+// job can refresh it — the newer save is never dropped (spec §5.6). The
+// artifact itself is retained (it may still be referenced by other worktrees;
+// invariant 5).
 func (c *Catalog) CommitDelete(ctx context.Context, wt core.WorktreeID, relPath string, gen core.Generation, job core.Job) error {
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM worktree_files
-			WHERE worktree_id=? AND relative_path=? AND generation<=?`,
-			string(wt), relPath, int64(gen)); err != nil {
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM index_jobs
+			WHERE worktree_id=? AND relative_path=? AND generation<=? AND desired_hash=?`,
+			string(job.WorktreeID), job.Path, int64(gen), job.DesiredHash)
+		if err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `
-			DELETE FROM index_jobs
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil // superseded: leave the view for the surviving upsert job
+		}
+		_, err = tx.ExecContext(ctx, `
+			DELETE FROM worktree_files
 			WHERE worktree_id=? AND relative_path=? AND generation<=?`,
-			string(job.WorktreeID), job.Path, int64(gen))
+			string(wt), relPath, int64(gen))
 		return err
 	})
 }

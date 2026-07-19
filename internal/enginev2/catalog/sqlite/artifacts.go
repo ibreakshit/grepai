@@ -8,8 +8,15 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
 
-// PutArtifact stores an immutable artifact. Re-inserting an identical
+// PutArtifact stores an immutable artifact row only. Re-inserting an identical
 // artifact_id is a no-op (INSERT OR IGNORE), preserving immutability.
+//
+// It does NOT write the artifact_chunks mapping. It must not be used on the
+// search/commit path: the whole-file cache-hit path relies on every artifact
+// returned by GetArtifact already having a complete chunk mapping, which only
+// CommitUpdate (via commitUpdateTx) establishes atomically with the view switch
+// (invariant 6). PutArtifact is a low-level building block for tests and
+// migration tooling that manage chunk rows separately.
 func (c *Catalog) PutArtifact(ctx context.Context, a core.Artifact) error {
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
 		return putArtifactTx(ctx, tx, a)

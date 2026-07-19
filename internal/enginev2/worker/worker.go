@@ -90,8 +90,14 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	// Supersession pre-check: a newer desired intent means this claim is stale
-	// — abandon it; the newer job is unclaimed and will be processed.
-	if curGen, curHash, ok, _ := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path); isSuperseded(curGen, curHash, ok, job) {
+	// — abandon it; the newer job is unclaimed and will be processed. A read
+	// error must not be mistaken for supersession (that would drop the still-
+	// claimed job): route it through transient retry so the claim is released.
+	curGen, curHash, cur, err := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path)
+	if err != nil {
+		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+	}
+	if isSuperseded(curGen, curHash, cur, job) {
 		return true, nil
 	}
 	if job.Operation == core.OpDelete {
@@ -142,8 +148,13 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	}
 	// Cheap second supersession guard; the commit's generation + desired_hash
 	// guards are the ultimate safety net, but this avoids a wasted commit and a
-	// visible view flicker when a rapid re-save arrived during the build.
-	if curGen, curHash, ok, _ := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path); isSuperseded(curGen, curHash, ok, job) {
+	// visible view flicker when a rapid re-save arrived during the build. As
+	// above, a read error is transient, not a supersession.
+	curGen2, curHash2, cur2, err := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path)
+	if err != nil {
+		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+	}
+	if isSuperseded(curGen2, curHash2, cur2, job) {
 		return true, nil
 	}
 	req := core.CommitRequest{

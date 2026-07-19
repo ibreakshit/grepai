@@ -9,19 +9,32 @@ import (
 )
 
 // DeadLetterJob atomically records a permanently-failed job and removes it from
-// the active queue. Guarded by generation so a newer supersede survives.
+// the active queue. It deletes only the exact job it is dead-lettering (same
+// generation and desired hash); if a newer desired intent has superseded that
+// row (a higher generation, or the same generation with a different desired
+// hash from a rapid re-save), the delete matches nothing and no dead-letter row
+// is written — the surviving newer job is neither dropped nor spuriously
+// dead-lettered.
 func (c *Catalog) DeadLetterJob(ctx context.Context, job core.Job, reason string) error {
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO dead_letter_jobs(worktree_id, relative_path, reason, created_at)
-			VALUES(?, ?, ?, datetime('now'))`,
-			string(job.WorktreeID), job.Path, reason); err != nil {
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM index_jobs
+			WHERE worktree_id=? AND relative_path=? AND generation<=? AND desired_hash=?`,
+			string(job.WorktreeID), job.Path, int64(job.Generation), job.DesiredHash)
+		if err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `
-			DELETE FROM index_jobs
-			WHERE worktree_id=? AND relative_path=? AND generation<=?`,
-			string(job.WorktreeID), job.Path, int64(job.Generation))
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil // superseded by a newer intent: nothing to dead-letter
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO dead_letter_jobs(worktree_id, relative_path, reason, created_at)
+			VALUES(?, ?, ?, datetime('now'))`,
+			string(job.WorktreeID), job.Path, reason)
 		return err
 	})
 }
@@ -42,15 +55,17 @@ func (c *Catalog) RequeueClaimedJobs(ctx context.Context) (int, error) {
 }
 
 // FailJobAttempt increments the attempt counter and releases the claim for a
-// transient failure, but only while the row is still at the job's generation
-// (a newer supersede leaves attempts alone). Returns the new attempt count.
+// transient failure, but only while the row is still the exact job that failed
+// (same generation and desired hash). A newer supersede leaves the newer row's
+// attempt count untouched — the returned count reflects the current row, so a
+// stale failure never pushes a valid newer save toward a premature dead-letter.
 func (c *Catalog) FailJobAttempt(ctx context.Context, job core.Job) (int, error) {
 	var attempts int
 	err := c.withWriteTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE index_jobs SET attempts=attempts+1, claimed=0
-			WHERE worktree_id=? AND relative_path=? AND generation=?`,
-			string(job.WorktreeID), job.Path, int64(job.Generation)); err != nil {
+			WHERE worktree_id=? AND relative_path=? AND generation=? AND desired_hash=?`,
+			string(job.WorktreeID), job.Path, int64(job.Generation), job.DesiredHash); err != nil {
 			return err
 		}
 		return tx.QueryRowContext(ctx, `
