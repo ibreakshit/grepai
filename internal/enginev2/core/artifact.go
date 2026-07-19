@@ -34,6 +34,9 @@ type Artifact struct {
 	ID         ArtifactID
 	Key        ArtifactKey
 	Dimensions int
+	// Chunks is the ordered chunk composition (identity + vector). Empty for a
+	// whole-file cache hit that reuses an already-stored artifact.
+	Chunks []ArtifactChunk
 }
 
 // ViewEntry maps a worktree path to the artifact it currently resolves to,
@@ -51,4 +54,7 @@ type ViewEntry struct {
 type CommitRequest struct {
 	View     ViewEntry
 	Artifact Artifact
+	// Chunks is the ordered chunk composition to persist atomically with the
+	// artifact and view switch (invariant 6). Ordinals must be 0..len-1.
+	Chunks []ArtifactChunk
 }
