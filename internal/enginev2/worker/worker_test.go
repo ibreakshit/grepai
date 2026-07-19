@@ -64,6 +64,46 @@ func realBuilder(emb *enginetest.FakeEmbedder, c *sqlite.Catalog) worker.Builder
 	return artifacts.New(indexer.NewChunker(512, 50), emb, c)
 }
 
+func TestProcessClaimedClassifies(t *testing.T) {
+	ctx := context.Background()
+	emb := enginetest.NewFakeEmbedder(4)
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c)
+	w := worker.New(c, realBuilder(emb, c), staticLoader{content: []byte("func main() {}")}, worker.NoCrash, 5)
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	job, ok, err := c.ClaimNextJob(ctx, core.PriorityBootstrap)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v", err)
+	}
+	oc, cause := w.ProcessClaimed(ctx, job)
+	if oc != worker.OutcomeCommitted || cause != nil {
+		t.Fatalf("want committed, got oc=%d cause=%v", oc, cause)
+	}
+	if id, ok, _ := c.ResolveView(ctx, "w", "a.go"); !ok || id == "" {
+		t.Fatal("view not committed by ProcessClaimed")
+	}
+}
+
+func TestProcessClaimedPermanentClassification(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c)
+	w := worker.New(c, stubBuilder{err: artifacts.ErrDimensionMismatch}, staticLoader{content: []byte("x")}, worker.NoCrash, 5)
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	job, ok, err := c.ClaimNextJob(ctx, core.PriorityBootstrap)
+	if err != nil || !ok {
+		t.Fatalf("claim: %v", err)
+	}
+	oc, cause := w.ProcessClaimed(ctx, job)
+	if oc != worker.OutcomePermanent || cause == nil {
+		t.Fatalf("want permanent+cause, got oc=%d cause=%v", oc, cause)
+	}
+	// ProcessClaimed must NOT dead-letter itself (the caller owns that).
+	if dlc, _ := c.DeadLetterCount(ctx); dlc != 0 {
+		t.Fatalf("ProcessClaimed must not dead-letter: %d", dlc)
+	}
+}
+
 func TestProcessOneCommitsUpsert(t *testing.T) {
 	ctx := context.Background()
 	emb := enginetest.NewFakeEmbedder(4)

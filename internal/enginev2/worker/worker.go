@@ -73,47 +73,58 @@ func (w *Worker) Recover(ctx context.Context) (int, error) {
 	return w.cat.RequeueClaimedJobs(ctx)
 }
 
-// ProcessOne claims and fully processes the next eligible job. It returns
-// (true, nil) when a job was handled (committed, dead-lettered, retried, or
-// dropped as superseded), (false, nil) when the queue was empty, and a non-nil
-// error only for an infrastructure failure or an injected crash — in which case
-// the claimed job stays claimed for Recover to requeue.
-func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
-	job, ok, err := w.cat.ClaimNextJob(ctx, core.PriorityBootstrap)
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		return false, nil
-	}
+// Outcome classifies the result of processing one claimed job. The zero value
+// is reserved for "unclassified" (an injected crash or infra error where the
+// job must stay claimed for Recover to requeue).
+type Outcome uint8
+
+const (
+	// OutcomeCommitted: the artifact/view/job committed (or a delete applied).
+	OutcomeCommitted Outcome = iota + 1
+	// OutcomeSuperseded: a newer desired intent replaced this job; dropped.
+	OutcomeSuperseded
+	// OutcomeTransient: a retryable failure (endpoint/timeout/read error).
+	OutcomeTransient
+	// OutcomePermanent: a non-retryable failure (e.g. dimension mismatch).
+	OutcomePermanent
+)
+
+// ProcessClaimed processes an already-claimed job and returns its classified
+// outcome. It does NOT retry, dead-letter, or unclaim — the caller (ProcessOne
+// or the scheduler) owns that. For OutcomeTransient/OutcomePermanent the
+// returned error is the cause (informational). An injected crash returns
+// (0, err): a zero Outcome signals the job was left claimed and unclassified.
+func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, error) {
 	if err := w.crash("after-claim"); err != nil {
-		return false, err
+		return 0, err
 	}
-	// Supersession pre-check: a newer desired intent means this claim is stale
-	// — abandon it; the newer job is unclaimed and will be processed. A read
-	// error must not be mistaken for supersession (that would drop the still-
-	// claimed job): route it through transient retry so the claim is released.
+	// Supersession pre-check: a newer desired intent means this claim is stale.
+	// A read error must not be mistaken for supersession (that would drop the
+	// still-claimed job): classify it transient so the caller releases/retries.
 	curGen, curHash, cur, err := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path)
 	if err != nil {
-		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+		return OutcomeTransient, err
 	}
 	if isSuperseded(curGen, curHash, cur, job) {
-		return true, nil
+		return OutcomeSuperseded, nil
 	}
 	if job.Operation == core.OpDelete {
-		return true, w.cat.CommitDelete(ctx, job.WorktreeID, job.Path, job.Generation, job)
+		if err := w.cat.CommitDelete(ctx, job.WorktreeID, job.Path, job.Generation, job); err != nil {
+			return OutcomeTransient, err
+		}
+		return OutcomeCommitted, nil
 	}
 	root, repo, err := w.cat.WorktreeInfo(ctx, job.WorktreeID)
 	if err != nil {
-		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+		return OutcomeTransient, err
 	}
 	fp, err := w.cat.GenerationFingerprint(ctx, repo, job.Generation)
 	if err != nil {
-		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+		return OutcomeTransient, err
 	}
 	content, err := w.load.Load(ctx, repo, root, job.Path, job.DesiredHash)
 	if err != nil {
-		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+		return OutcomeTransient, err
 	}
 	key := core.ArtifactKey{RepositoryID: repo, RelativePath: job.Path, SourceHash: job.DesiredHash, Fingerprint: fp}
 
@@ -126,36 +137,34 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	} else {
 		art, err = w.build.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
 		if err != nil {
-			class := core.FailureTransient
 			if errors.Is(err, artifacts.ErrDimensionMismatch) {
-				class = core.FailurePermanent
+				return OutcomePermanent, err
 			}
-			return true, w.retryOrDeadLetter(ctx, job, class, err)
+			return OutcomeTransient, err
 		}
 	}
 	if err := w.crash("after-build"); err != nil {
-		return false, err
+		return 0, err
 	}
 	if !wholeHit {
 		for _, ch := range art.Chunks {
 			if err := w.cat.PutChunkVector(ctx, ch.ChunkID, repo, fp, ch.Vector); err != nil {
-				return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+				return OutcomeTransient, err
 			}
 		}
 	}
 	if err := w.crash("after-chunks"); err != nil {
-		return false, err
+		return 0, err
 	}
 	// Cheap second supersession guard; the commit's generation + desired_hash
 	// guards are the ultimate safety net, but this avoids a wasted commit and a
-	// visible view flicker when a rapid re-save arrived during the build. As
-	// above, a read error is transient, not a supersession.
+	// visible view flicker when a rapid re-save arrived during the build.
 	curGen2, curHash2, cur2, err := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path)
 	if err != nil {
-		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+		return OutcomeTransient, err
 	}
 	if isSuperseded(curGen2, curHash2, cur2, job) {
-		return true, nil
+		return OutcomeSuperseded, nil
 	}
 	req := core.CommitRequest{
 		View:     core.ViewEntry{WorktreeID: job.WorktreeID, Path: job.Path, ArtifactID: art.ID, Generation: job.Generation},
@@ -163,9 +172,37 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		Chunks:   art.Chunks, // nil for a whole-file cache hit (mapping already present)
 	}
 	if err := w.cat.CommitUpdate(ctx, req, job); err != nil {
-		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, err)
+		return OutcomeTransient, err
 	}
-	return true, nil
+	return OutcomeCommitted, nil
+}
+
+// ProcessOne claims and fully processes the next eligible job, applying durable
+// retry and dead-lettering itself (the standalone Phase 3 driver). It returns
+// (true, nil) when a job was handled (committed, dead-lettered, retried, or
+// dropped as superseded), (false, nil) when the queue was empty, and a non-nil
+// error only for an unclassified crash — in which case the claimed job stays
+// claimed for Recover to requeue. The scheduler instead claims jobs and calls
+// ProcessClaimed directly, owning retry timing.
+func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
+	job, ok, err := w.cat.ClaimNextJob(ctx, core.PriorityBootstrap)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	oc, cause := w.ProcessClaimed(ctx, job)
+	switch oc {
+	case OutcomeCommitted, OutcomeSuperseded:
+		return true, nil
+	case OutcomePermanent:
+		return true, w.retryOrDeadLetter(ctx, job, core.FailurePermanent, cause)
+	case OutcomeTransient:
+		return true, w.retryOrDeadLetter(ctx, job, core.FailureTransient, cause)
+	default: // 0: unclassified crash — leave claimed for Recover
+		return false, cause
+	}
 }
 
 // Run drains the queue until empty, then returns when ctx is canceled.
