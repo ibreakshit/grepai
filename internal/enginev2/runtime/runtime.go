@@ -7,6 +7,9 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha1" //nolint:gosec // G401/G505 - git blob object id format, not a security use
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -60,8 +63,34 @@ func chunkParams(cfg *config.Config) (size, overlap int) {
 // content the reconciler hashed.
 type diskLoader struct{}
 
-func (diskLoader) Load(_ context.Context, _ core.RepositoryID, root, rel, _ string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(root, rel)) // #nosec G304 - operator's own worktree file
+func (diskLoader) Load(_ context.Context, _ core.RepositoryID, root, rel, desiredHash string) ([]byte, error) {
+	b, err := os.ReadFile(filepath.Join(root, rel)) // #nosec G304 - operator's own worktree file
+	if err != nil {
+		return nil, err
+	}
+	// The worker requires the exact desired version's bytes. The reconciler's
+	// DesiredHash is a git blob OID (tracked/dirty files) or a sha256 (non-git);
+	// verify the on-disk bytes hash to it, so a file changed between
+	// reconciliation and load is rejected rather than committed under the wrong
+	// identity (the rejection is transient — a later reconcile re-derives it).
+	if desiredHash != "" && gitBlobOID(b) != desiredHash && sha256Hex(b) != desiredHash {
+		return nil, fmt.Errorf("content of %q changed since reconciliation", rel)
+	}
+	return b, nil
+}
+
+// gitBlobOID computes the git blob object id of content ("blob <len>\0<content>"
+// hashed with SHA-1), matching git ls-files -s / hash-object.
+func gitBlobOID(content []byte) string {
+	h := sha1.New() //nolint:gosec // G401 - git object id format, not security
+	fmt.Fprintf(h, "blob %d\x00", len(content))
+	_, _ = h.Write(content)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
 }
 
 // Engine is a runnable v2 index+search runtime for one worktree.
