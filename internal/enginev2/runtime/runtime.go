@@ -218,6 +218,11 @@ func (e *Engine) Search(ctx context.Context, query string) ([]core.SearchHit, co
 // Close releases the catalog.
 func (e *Engine) Close() error { return e.cat.Close() }
 
+// EnsureSelfIgnore is the exported wrapper the daemon uses to keep a repo's
+// .grepai data directory out of reconciliation (same behavior the one-shot
+// runtime applies in Open).
+func EnsureSelfIgnore(dir, catalogFile string) error { return ensureSelfIgnore(dir, catalogFile) }
+
 // ensureSelfIgnore makes sure the data directory ignores the opened catalog's
 // own files (catalogFile plus its SQLite -wal/-shm siblings), so reconciliation
 // never indexes them. If no .gitignore exists it writes one ignoring everything;
