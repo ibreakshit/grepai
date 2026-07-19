@@ -37,9 +37,12 @@ type SearchRequest struct {
 	Query      string
 }
 
-// SearchResponse is the placeholder search result envelope (Phase 5 fills it).
+// SearchResponse carries worktree-scoped ranked results plus freshness metadata.
 type SearchResponse struct {
-	WorktreeID core.WorktreeID
+	WorktreeID       core.WorktreeID
+	Results          []core.SearchHit
+	ActiveGeneration core.Generation
+	Fresh            bool // true when the worktree has no pending index jobs
 }
 
 // TraceRequest issues a call-graph query within an explicit worktree view.
@@ -48,9 +51,11 @@ type TraceRequest struct {
 	Symbol     string
 }
 
-// TraceResponse is the placeholder trace result envelope (Phase 5 fills it).
+// TraceResponse carries call-graph symbols. Symbol extraction is deferred, so
+// this phase always returns an empty Symbols slice.
 type TraceResponse struct {
 	WorktreeID core.WorktreeID
+	Symbols    []string
 }
 
 // StatusRequest asks for indexing/freshness status.
@@ -58,9 +63,12 @@ type StatusRequest struct {
 	WorktreeID core.WorktreeID
 }
 
-// StatusResponse is the placeholder status envelope (Phase 5 fills it).
+// StatusResponse reports indexing/freshness status for a worktree.
 type StatusResponse struct {
 	ActiveGeneration core.Generation
+	Pending          int  // active index jobs for the worktree
+	Fresh            bool // true when Pending == 0
+	DeadLetters      int  // host-wide dead-letter count (coarse this phase)
 }
 
 // WaitFreshRequest waits for selected paths to become fresh with a deadline.
