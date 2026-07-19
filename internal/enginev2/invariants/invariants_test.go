@@ -8,12 +8,21 @@ package invariants_test
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/yoanbernabeu/grepai/indexer"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/artifacts"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/catalog"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/catalog/sqlite"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/enginetest"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/reconcile"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/scheduler"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/worker"
 )
 
 // Invariant 4 (worktree isolation): a search from one worktree cannot return a
@@ -72,37 +81,216 @@ func TestInvariant_FingerprintCorrectness(t *testing.T) {
 	}
 }
 
-// The following invariants require production implementations. They are
-// compiled scaffolds proving the interfaces are sufficient to express them.
+// --- integration harness for the invariants that need production impls ---
 
-// Invariant 1 (idle means idle): startup reconciliation of an unchanged
-// repository issues zero embedding calls. Implemented in Phase 2 + Phase 3.
+func openCatalog(t *testing.T) *sqlite.Catalog {
+	t.Helper()
+	c, err := sqlite.Open(context.Background(), filepath.Join(t.TempDir(), "cat.db"))
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func newWorker(cat *sqlite.Catalog, emb *enginetest.FakeEmbedder, load worker.ContentLoader, crash worker.CrashHook) *worker.Worker {
+	return worker.New(cat, artifacts.New(indexer.NewChunker(512, 50), emb, cat), load, crash, 5)
+}
+
+// seedRepoWorktree registers repo "r", worktree "w", and an active generation 1.
+func seedRepoWorktree(t *testing.T, cat *sqlite.Catalog) {
+	t.Helper()
+	ctx := context.Background()
+	mustErr(t, cat.RegisterRepository(ctx, "r", ".", ""))
+	mustErr(t, cat.RegisterWorktree(ctx, "w", "r", ".", 1))
+	mustErr(t, cat.CreateGeneration(ctx, "r", 1, "fp"))
+	mustErr(t, cat.SetActiveGeneration(ctx, "r", 1))
+}
+
+func mustErr(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// diskLoader reads a file from the worktree root (git-clean content).
+type diskLoader struct{}
+
+func (diskLoader) Load(_ context.Context, _ core.RepositoryID, root, rel, _ string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(root, rel))
+}
+
+// staticLoader returns fixed bytes regardless of hash.
+type staticLoader struct{ content []byte }
+
+func (l staticLoader) Load(_ context.Context, _ core.RepositoryID, _, _, _ string) ([]byte, error) {
+	return l.content, nil
+}
+
+// hashLoader returns content chosen by the desired hash.
+type hashLoader struct{ byHash map[string][]byte }
+
+func (l hashLoader) Load(_ context.Context, _ core.RepositoryID, _, _, desiredHash string) ([]byte, error) {
+	if b, ok := l.byHash[desiredHash]; ok {
+		return b, nil
+	}
+	return nil, errors.New("no content for hash")
+}
+
+// Invariant 1 (idle means idle) — the project's defining guarantee: after a
+// repository is indexed, reconciling it unchanged produces zero jobs and issues
+// zero further embedding calls. Real end-to-end: git truth → reconcile → worker
+// → catalog, then reconcile again.
 func TestInvariant_IdleMeansIdle(t *testing.T) {
-	t.Skip("Phase 2/3: reconciler + artifact indexer required")
-	// Scaffold shape: reconcile a fixture with no changes, assert
-	// enginetest.FakeEmbedder.EmbedCalls() == 0.
-	_ = enginetest.NewFakeEmbedder(8)
+	ctx := context.Background()
+	fx := enginetest.NewGitFixture(t)
+	fx.WriteFile("a.go", "package main\n\nfunc main() {}\n")
+	fx.Commit("init")
+
+	cat := openCatalog(t)
+	repo := core.RepositoryID("r")
+	wt := core.WorktreeID("w")
+	mustErr(t, cat.RegisterRepository(ctx, repo, fx.Root(), ""))
+	mustErr(t, cat.RegisterWorktree(ctx, wt, repo, fx.Root(), 1))
+	mustErr(t, cat.CreateGeneration(ctx, repo, 1, "fp"))
+	mustErr(t, cat.SetActiveGeneration(ctx, repo, 1))
+
+	emb := enginetest.NewFakeEmbedder(4)
+	w := newWorker(cat, emb, diskLoader{}, worker.NoCrash)
+	rec := reconcile.New(cat)
+
+	// First reconcile discovers the new file; enqueue + drain (this embeds).
+	p1, err := rec.Reconcile(ctx, wt)
+	mustErr(t, err)
+	if len(p1.Jobs) == 0 {
+		t.Fatal("first reconcile should discover the new file")
+	}
+	for _, j := range p1.Jobs {
+		mustErr(t, cat.UpsertJob(ctx, j))
+	}
+	mustErr(t, w.Run(ctx))
+	embedded := emb.EmbedCalls()
+	if embedded == 0 {
+		t.Fatal("indexing should have issued embedding calls")
+	}
+
+	// Reconciling the UNCHANGED repository must yield zero jobs and zero new embeds.
+	p2, err := rec.Reconcile(ctx, wt)
+	mustErr(t, err)
+	if len(p2.Jobs) != 0 {
+		t.Fatalf("invariant 1 violated: idle repo produced %d jobs", len(p2.Jobs))
+	}
+	if emb.EmbedCalls() != embedded {
+		t.Fatalf("invariant 1 violated: idle reconcile issued embeddings: %d -> %d", embedded, emb.EmbedCalls())
+	}
 }
 
-// Invariant 6 (atomic visibility): a failed embedding leaves the prior
-// artifact searchable. Implemented in Phase 3.
+// Invariant 6 (atomic visibility): a failed embedding leaves the previously
+// committed artifact searchable — the view never regresses to a partial state.
 func TestInvariant_AtomicVisibility(t *testing.T) {
-	t.Skip("Phase 3: artifact indexer commit protocol required")
-	// Scaffold: the atomic commit surface under test is catalog.Catalog.CommitUpdate.
-	var _ catalog.Catalog = enginetest.NewFakeCatalog()
+	ctx := context.Background()
+	cat := openCatalog(t)
+	seedRepoWorktree(t, cat)
+	emb := enginetest.NewFakeEmbedder(4)
+	load := hashLoader{byHash: map[string][]byte{"h1": []byte("func v1() {}"), "h2": []byte("func v2() {}")}}
+	w := newWorker(cat, emb, load, worker.NoCrash)
+
+	mustErr(t, cat.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	_, err := w.ProcessOne(ctx)
+	mustErr(t, err)
+	v1, ok, _ := cat.ResolveView(ctx, "w", "a.go")
+	if !ok {
+		t.Fatal("v1 must be committed")
+	}
+
+	emb.SetError(errors.New("endpoint down"))
+	mustErr(t, cat.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h2", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	for i := 0; i < 12; i++ {
+		if _, err := w.ProcessOne(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if n, _ := cat.DeadLetterCount(ctx); n > 0 {
+			break
+		}
+	}
+	v2, ok, _ := cat.ResolveView(ctx, "w", "a.go")
+	if !ok || v2 != v1 {
+		t.Fatalf("invariant 6 violated: a failed embedding changed the searchable view (v1=%s v2=%s ok=%v)", v1, v2, ok)
+	}
 }
 
-// Invariant 7 (durable progress): committed work survives a crash at any
-// durable-state boundary. Implemented in Phase 1 + Phase 3 (uses CrashRegistry).
+// Invariant 7 (durable progress): committed work survives a crash at a durable
+// boundary — an injected crash before commit is invisible, and recovery
+// reprocesses to a valid committed state.
 func TestInvariant_DurableProgress(t *testing.T) {
-	t.Skip("Phase 1/3: SQLite catalog + crash-point wiring required")
-	_ = enginetest.NewCrashRegistry()
+	ctx := context.Background()
+	cat := openCatalog(t)
+	seedRepoWorktree(t, cat)
+	emb := enginetest.NewFakeEmbedder(4)
+	reg := enginetest.NewCrashRegistry()
+	reg.ArmAt("after-chunks")
+	load := staticLoader{content: []byte("func main() {}")}
+	w := newWorker(cat, emb, load, reg.Check)
+
+	mustErr(t, cat.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	if _, err := w.ProcessOne(ctx); !errors.Is(err, enginetest.ErrInjectedCrash) {
+		t.Fatalf("expected injected crash, got %v", err)
+	}
+	if _, ok, _ := cat.ResolveView(ctx, "w", "a.go"); ok {
+		t.Fatal("crashed (uncommitted) work must not be visible")
+	}
+
+	// Restart: recover the claimed job and reprocess.
+	w2 := newWorker(cat, emb, load, worker.NoCrash)
+	if _, err := w2.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustErr(t, w2.Run(ctx))
+	if _, ok, _ := cat.ResolveView(ctx, "w", "a.go"); !ok {
+		t.Fatal("invariant 7 violated: committed progress lost across a crash + recovery")
+	}
 }
 
-// Invariant 8 (bounded failure): unavailable backends produce bounded calls,
-// no restart loop. Implemented in Phase 4 (scheduler + circuit breaker).
+// Invariant 8 (bounded failure): a persistently unavailable backend trips the
+// circuit breaker (bounded calls) and the scheduler keeps running — no restart
+// loop.
 func TestInvariant_BoundedFailure(t *testing.T) {
-	t.Skip("Phase 4: scheduler circuit breaker required")
-	// Scaffold: bounded failure is a property of the scheduler.Scheduler surface.
-	var _ scheduler.Scheduler
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cat := openCatalog(t)
+	seedRepoWorktree(t, cat)
+	emb := enginetest.NewFakeEmbedder(4)
+	emb.SetError(errors.New("503 service unavailable"))
+	w := newWorker(cat, emb, staticLoader{content: []byte("x")}, worker.NoCrash)
+
+	cfg := scheduler.DefaultConfig()
+	cfg.CircuitOpenAfter = 3
+	cfg.MaxIndexInflight = 1
+	e, err := scheduler.New(cfg, cat, w, enginetest.NewFakeClock(time.Unix(0, 0)), 1)
+	mustErr(t, err)
+	for _, p := range []string{"a.go", "b.go", "c.go", "d.go", "e.go"} {
+		mustErr(t, cat.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: p, DesiredHash: p, Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	}
+	done := make(chan struct{})
+	go func() { _ = e.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && e.Stats().Circuit != "open" {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if e.Stats().Circuit != "open" {
+		t.Fatal("invariant 8 violated: breaker should open under a persistent outage")
+	}
+	select {
+	case <-done:
+		t.Fatal("invariant 8 violated: scheduler exited on backend failure")
+	default:
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("scheduler did not stop after cancel")
+	}
 }
