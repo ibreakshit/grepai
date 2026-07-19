@@ -57,6 +57,11 @@ func chunkParams(cfg *config.Config) (size, overlap int) {
 	return size, overlap
 }
 
+// NewDiskLoader returns the worktree-file ContentLoader used by the one-shot
+// runtime and the daemon. It is stateless (the worktree root arrives per call),
+// so one instance serves every repository.
+func NewDiskLoader() worker.ContentLoader { return diskLoader{} }
+
 // diskLoader loads a file's current bytes from the worktree root. For a clean
 // tracked file this equals the committed content (so its git blob OID matches
 // the reconciler's DesiredHash); for dirty/untracked files it is the current
