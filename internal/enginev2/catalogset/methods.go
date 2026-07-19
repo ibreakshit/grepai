@@ -265,6 +265,11 @@ func (s *Set) RequeueClaimedJobs(ctx context.Context) (int, error) {
 // ClaimNextJob (host-wide, no repo arg) exists only to satisfy worker.Catalog.
 // The daemon's scheduler claims per-repo via ClaimNextJobInRepo, so this is
 // never called in the daemon path; implemented as a first-non-empty fan-out.
+//
+// WARNING: do NOT drive a worker.Worker.Run loop with a Set. This fan-out uses
+// nondeterministic map order (no fairness — a perpetually busy catalog can
+// starve the rest) and fails on the first catalog error. The scheduler is the
+// only supported multi-repo drainer.
 func (s *Set) ClaimNextJob(ctx context.Context, minPriority core.Priority) (core.Job, bool, error) {
 	for _, c := range s.snapshot() {
 		job, ok, err := c.ClaimNextJob(ctx, minPriority)

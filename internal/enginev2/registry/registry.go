@@ -76,8 +76,21 @@ func (r *Registry) Save(path string) error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil { // flush temp contents before the rename
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// fsync the parent directory so the rename itself survives power loss.
+	dir, err := os.Open(filepath.Dir(path)) // #nosec G304 - operator's own state dir
+	if err != nil {
+		return nil // rename succeeded; dir-sync is best-effort durability
+	}
+	_ = dir.Sync()
+	return dir.Close()
 }

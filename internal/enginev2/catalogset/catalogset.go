@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/yoanbernabeu/grepai/internal/enginev2/artifacts"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/catalog/sqlite"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
@@ -90,6 +91,19 @@ func (s *Set) bindWorktree(wt core.WorktreeID, repo core.RepositoryID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.wtToR[wt] = repo
+}
+
+// ChunkCache returns repo's catalog as an artifacts.ChunkCache so the daemon
+// can build one artifacts.DefaultBuilder per repo that shares Set's
+// already-open handle — no second Open of the same SQLite file, and no extra
+// handle for anyone else to close (Set.Close owns it). Errors with
+// ErrUnknownRepo for an unregistered repo.
+func (s *Set) ChunkCache(repo core.RepositoryID) (artifacts.ChunkCache, error) {
+	c, err := s.get(repo)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
 }
 
 // get returns the catalog for repo, or ErrUnknownRepo.
