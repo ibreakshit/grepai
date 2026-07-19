@@ -58,12 +58,16 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 		string(req.View.WorktreeID), req.View.Path, string(req.View.ArtifactID), int64(req.View.Generation)); err != nil {
 		return err
 	}
-	// Complete only a job at or below the committed generation. A newer pending
-	// generation (a supersede that arrived while this work ran) must survive so
-	// its own commit can run.
+	// Complete only the exact job this commit fulfills: same generation and the
+	// same desired hash. A newer pending intent — a higher generation, or the
+	// same generation with a different desired hash (a rapid re-save) — must
+	// survive so its own commit can run (spec §5.6: only the newest desired
+	// state commits). Guarding on desired_hash is essential: without it, a
+	// stale same-generation commit would delete the newer save's job.
 	_, err := tx.ExecContext(ctx, `
-		DELETE FROM index_jobs WHERE worktree_id=? AND relative_path=? AND generation<=?`,
-		string(job.WorktreeID), job.Path, int64(req.View.Generation))
+		DELETE FROM index_jobs
+		WHERE worktree_id=? AND relative_path=? AND generation<=? AND desired_hash=?`,
+		string(job.WorktreeID), job.Path, int64(req.View.Generation), job.DesiredHash)
 	return err
 }
 

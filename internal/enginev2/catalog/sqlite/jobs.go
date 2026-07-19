@@ -63,19 +63,23 @@ func (c *Catalog) FailJobAttempt(ctx context.Context, job core.Job) (int, error)
 	return attempts, err
 }
 
-// DesiredGeneration returns the pending job generation for a path, if any.
-func (c *Catalog) DesiredGeneration(ctx context.Context, wt core.WorktreeID, relPath string) (core.Generation, bool, error) {
+// CurrentJob returns the current desired intent (generation and desired hash)
+// for a path, if a job row exists. The worker compares this against the job it
+// claimed to detect supersession on either axis: a newer generation, or the
+// same generation with a different desired hash (a rapid re-save).
+func (c *Catalog) CurrentJob(ctx context.Context, wt core.WorktreeID, relPath string) (core.Generation, string, bool, error) {
 	var gen int64
+	var hash string
 	err := c.db.QueryRowContext(ctx, `
-		SELECT generation FROM index_jobs WHERE worktree_id=? AND relative_path=?`,
-		string(wt), relPath).Scan(&gen)
+		SELECT generation, desired_hash FROM index_jobs WHERE worktree_id=? AND relative_path=?`,
+		string(wt), relPath).Scan(&gen, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+		return 0, "", false, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return 0, "", false, err
 	}
-	return core.Generation(gen), true, nil
+	return core.Generation(gen), hash, true, nil
 }
 
 // GenerationFingerprint returns the fingerprint recorded for a generation.

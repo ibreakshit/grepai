@@ -118,7 +118,7 @@ func TestDeadLetterAndRequeueAndAttempt(t *testing.T) {
 	}
 }
 
-func TestGenerationFingerprintAndDesiredGeneration(t *testing.T) {
+func TestGenerationFingerprintAndCurrentJob(t *testing.T) {
 	ctx := context.Background()
 	c := newTestCatalog(t)
 	seedRepoWorktree(t, c, "r", "w")
@@ -127,14 +127,14 @@ func TestGenerationFingerprintAndDesiredGeneration(t *testing.T) {
 	if err != nil || fp != "fp" {
 		t.Fatalf("fingerprint=%q err=%v", fp, err)
 	}
-	if _, ok, _ := c.DesiredGeneration(ctx, "w", "a.go"); ok {
+	if _, _, ok, _ := c.CurrentJob(ctx, "w", "a.go"); ok {
 		t.Fatal("no job yet => not ok")
 	}
-	if err := c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h", Generation: 7, Operation: core.OpUpsert, Priority: core.PriorityReconcile}); err != nil {
+	if err := c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h7", Generation: 7, Operation: core.OpUpsert, Priority: core.PriorityReconcile}); err != nil {
 		t.Fatal(err)
 	}
-	g, ok, err := c.DesiredGeneration(ctx, "w", "a.go")
-	if err != nil || !ok || g != 7 {
-		t.Fatalf("desired gen=%d ok=%v err=%v", g, ok, err)
+	g, hash, ok, err := c.CurrentJob(ctx, "w", "a.go")
+	if err != nil || !ok || g != 7 || hash != "h7" {
+		t.Fatalf("current job gen=%d hash=%q ok=%v err=%v", g, hash, ok, err)
 	}
 }

@@ -19,8 +19,19 @@ type Catalog interface {
 	CommitDelete(ctx context.Context, wt core.WorktreeID, relPath string, gen core.Generation, job core.Job) error
 	DeadLetterJob(ctx context.Context, job core.Job, reason string) error
 	FailJobAttempt(ctx context.Context, job core.Job) (int, error)
-	DesiredGeneration(ctx context.Context, wt core.WorktreeID, relPath string) (core.Generation, bool, error)
+	CurrentJob(ctx context.Context, wt core.WorktreeID, relPath string) (core.Generation, string, bool, error)
 	RequeueClaimedJobs(ctx context.Context) (int, error)
+}
+
+// isSuperseded reports whether the current desired intent for a path has moved
+// past the job the worker claimed — a newer generation, or the same generation
+// with a different desired hash (a rapid re-save). A vanished row (ok=false)
+// also counts: the claimed intent no longer exists, so nothing should commit.
+func isSuperseded(curGen core.Generation, curHash string, ok bool, job core.Job) bool {
+	if !ok {
+		return true
+	}
+	return curGen > job.Generation || (curGen == job.Generation && curHash != job.DesiredHash)
 }
 
 // Builder builds an artifact from content (satisfied by *artifacts.DefaultBuilder).
@@ -78,9 +89,9 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	if err := w.crash("after-claim"); err != nil {
 		return false, err
 	}
-	// Supersession pre-check: a newer desired generation means this claim is
-	// stale — abandon it; the newer job is unclaimed and will be processed.
-	if desired, ok, _ := w.cat.DesiredGeneration(ctx, job.WorktreeID, job.Path); ok && desired > job.Generation {
+	// Supersession pre-check: a newer desired intent means this claim is stale
+	// — abandon it; the newer job is unclaimed and will be processed.
+	if curGen, curHash, ok, _ := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path); isSuperseded(curGen, curHash, ok, job) {
 		return true, nil
 	}
 	if job.Operation == core.OpDelete {
@@ -129,9 +140,10 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 	if err := w.crash("after-chunks"); err != nil {
 		return false, err
 	}
-	// Cheap second supersession guard; the commit's generation guard is the
-	// ultimate safety net, but this avoids a wasted commit.
-	if desired, ok, _ := w.cat.DesiredGeneration(ctx, job.WorktreeID, job.Path); ok && desired > job.Generation {
+	// Cheap second supersession guard; the commit's generation + desired_hash
+	// guards are the ultimate safety net, but this avoids a wasted commit and a
+	// visible view flicker when a rapid re-save arrived during the build.
+	if curGen, curHash, ok, _ := w.cat.CurrentJob(ctx, job.WorktreeID, job.Path); isSuperseded(curGen, curHash, ok, job) {
 		return true, nil
 	}
 	req := core.CommitRequest{
