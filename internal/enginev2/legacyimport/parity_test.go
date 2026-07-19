@@ -16,12 +16,15 @@ func TestTopKOverlap(t *testing.T) {
 		k    int
 		want float64
 	}{
-		{"two-of-three", []string{"a", "b", "c"}, []string{"a", "b", "d"}, 3, 2.0 / 3.0},
+		{"jaccard-half", []string{"a", "b", "c"}, []string{"a", "b", "d"}, 3, 2.0 / 4.0}, // ∩=2 ∪=4
 		{"identical", []string{"a", "b", "c"}, []string{"a", "b", "c"}, 3, 1.0},
 		{"disjoint", []string{"a", "b", "c"}, []string{"x", "y", "z"}, 3, 0.0},
 		{"both-empty", nil, nil, 3, 1.0},
+		{"one-empty", []string{"a"}, nil, 3, 0.0},
+		{"cardinality-penalized", []string{"a"}, []string{"a", "b", "c"}, 3, 1.0 / 3.0}, // ∩=1 ∪=3
 		{"fewer-than-k-identical", []string{"a", "b"}, []string{"a", "b"}, 5, 1.0},
 		{"dedup-order", []string{"a", "a", "b"}, []string{"a", "b"}, 2, 1.0},
+		{"k-zero", []string{"a"}, []string{"a"}, 0, 0.0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,7 +66,7 @@ func TestRunParityMeanAcrossQueries(t *testing.T) {
 	if len(rep.PerQuery) != 2 {
 		t.Fatalf("per-query len=%d", len(rep.PerQuery))
 	}
-	want := 2.0 / 3.0
+	want := 2.0 / 4.0 // Jaccard: ∩={a,b}=2, ∪={a,b,c,d}=4
 	if rep.Mean != want {
 		t.Fatalf("mean=%v want %v", rep.Mean, want)
 	}

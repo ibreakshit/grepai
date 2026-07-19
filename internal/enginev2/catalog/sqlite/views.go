@@ -151,6 +151,20 @@ func (c *Catalog) CommitDelete(ctx context.Context, wt core.WorktreeID, relPath 
 	})
 }
 
+// DeleteWorktreeView unconditionally removes a single file from a worktree's
+// view. Unlike CommitDelete it is not tied to an index job: it exists for
+// migration, which owns a dedicated catalog and prunes views for source files
+// that no longer exist in the legacy index. The shared immutable artifact is
+// retained (invariant 5); only this worktree's view row is removed.
+func (c *Catalog) DeleteWorktreeView(ctx context.Context, wt core.WorktreeID, relPath string) error {
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			DELETE FROM worktree_files WHERE worktree_id=? AND relative_path=?`,
+			string(wt), relPath)
+		return err
+	})
+}
+
 // UpsertJob records desired file state, superseding an existing job for the
 // same (worktree, path) only when the incoming generation is at least as new.
 func (c *Catalog) UpsertJob(ctx context.Context, job core.Job) error {

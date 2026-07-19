@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,16 +130,18 @@ func runV2Migrate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// gobV1Searcher adapts a v1 GOBStore to legacyimport.V1Searcher, over-fetching
-// chunks so that k unique files can be recovered from chunk-level results.
+// gobV1Searcher adapts a v1 GOBStore to legacyimport.V1Searcher. It ranks over
+// ALL chunks so the top-k unique files are exact — a single dominant file cannot
+// occupy a fixed fetch window and hide lower-ranked distinct files (this is a
+// validation tool, so completeness beats speed).
 type gobV1Searcher struct{ s *store.GOBStore }
 
-func (g gobV1Searcher) Search(ctx context.Context, query []float32, k int) ([]string, error) {
-	fetch := k * 10
-	if fetch < 50 {
-		fetch = 50
+func (g gobV1Searcher) Search(ctx context.Context, query []float32, _ int) ([]string, error) {
+	_, numChunks := g.s.Stats()
+	if numChunks < 1 {
+		numChunks = 1
 	}
-	res, err := g.s.Search(ctx, query, fetch, store.SearchOptions{})
+	res, err := g.s.Search(ctx, query, numChunks, store.SearchOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +154,12 @@ func (g gobV1Searcher) Search(ctx context.Context, query []float32, k int) ([]st
 
 func runV2Parity(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
+	if v2ParityK < 1 {
+		return fmt.Errorf("--k must be >= 1")
+	}
+	if math.IsNaN(v2ParityThresh) || math.IsInf(v2ParityThresh, 0) || v2ParityThresh < 0 || v2ParityThresh > 1 {
+		return fmt.Errorf("--threshold must be a finite value in [0,1]")
+	}
 	root, err := resolveMigrateRoot(args)
 	if err != nil {
 		return err
@@ -167,11 +176,16 @@ func runV2Parity(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no queries: pass --query (repeatable) or --queries-file")
 	}
 
+	// The loaded GOBStore is an in-memory reader; it is NOT closed, because
+	// GOBStore.Close() persists (rewrites) the file — closing it would mutate the
+	// read-only legacy index.
 	v1store := store.NewGOBStore(v1IndexPath(root, v2ParityIndex))
 	if err := v1store.Load(ctx); err != nil {
 		return fmt.Errorf("load v1 index: %w", err)
 	}
-	defer func() { _ = v1store.Close() }()
+	if _, numChunks := v1store.Stats(); numChunks == 0 {
+		return fmt.Errorf("v1 index has no chunks (nothing to compare)")
+	}
 
 	cat, err := sqlite.Open(ctx, migratedCatalogPath(root, v2ParityCatalog))
 	if err != nil {
@@ -179,13 +193,21 @@ func runV2Parity(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = cat.Close() }()
 
+	wt := core.WorktreeID(root)
+	views, err := cat.WorktreeViewPaths(ctx, wt)
+	if err != nil {
+		return fmt.Errorf("read migrated views: %w", err)
+	}
+	if len(views) == 0 {
+		return fmt.Errorf("no migrated index for %s: run `grepai v2 migrate` first", root)
+	}
+
 	emb, err := embedder.NewFromConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("create embedder: %w", err)
 	}
 	defer func() { _ = emb.Close() }()
 
-	wt := core.WorktreeID(root)
 	rep, err := legacyimport.RunParity(ctx, emb, gobV1Searcher{s: v1store}, cat, wt, queries, v2ParityK)
 	if err != nil {
 		return err

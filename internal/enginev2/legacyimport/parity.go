@@ -34,10 +34,16 @@ type ParityReport struct {
 	Mean     float64
 }
 
-// TopKOverlap is the fraction of shared files among the top-k unique files of
-// each ranked list: |A∩B| / min(k, |A|, |B|). Two empty lists are a perfect 1.0
-// (both engines returned nothing). Order within k does not matter.
+// TopKOverlap is the Jaccard similarity of the top-k unique files of each ranked
+// list: |A∩B| / |A∪B|. Using the union as the denominator penalizes cardinality
+// differences — ["a"] versus ["a","b","c"] scores 1/3, not 1.0 — so a truncated
+// or near-empty result cannot masquerade as agreement. Two empty lists are a
+// perfect 1.0; one empty list is 0.0. Order within k does not matter. k<1 yields
+// 0 (nothing compared).
 func TopKOverlap(a, b []string, k int) float64 {
+	if k < 1 {
+		return 0.0
+	}
 	ua := uniqueTopK(a, k)
 	ub := uniqueTopK(b, k)
 	if len(ua) == 0 && len(ub) == 0 {
@@ -53,17 +59,11 @@ func TopKOverlap(a, b []string, k int) float64 {
 			inter++
 		}
 	}
-	denom := k
-	if denom > len(ua) {
-		denom = len(ua)
-	}
-	if denom > len(ub) {
-		denom = len(ub)
-	}
-	if denom == 0 {
+	union := len(ua) + len(ub) - inter
+	if union == 0 {
 		return 0.0
 	}
-	return float64(inter) / float64(denom)
+	return float64(inter) / float64(union)
 }
 
 // uniqueTopK returns the first k distinct paths preserving input order.

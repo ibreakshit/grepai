@@ -21,30 +21,60 @@ const migrationGeneration core.Generation = 1
 // CatalogWriter is the v2 catalog surface the importer needs. It mirrors the
 // concrete methods on *sqlite.Catalog, so a real catalog satisfies it directly.
 type CatalogWriter interface {
+	ActiveGeneration(ctx context.Context, repo core.RepositoryID) (core.Generation, error)
+	GenerationFingerprint(ctx context.Context, repo core.RepositoryID, gen core.Generation) (string, error)
 	RegisterRepository(ctx context.Context, repo core.RepositoryID, rootPath, gitCommonDir string) error
 	RegisterWorktree(ctx context.Context, wt core.WorktreeID, repo core.RepositoryID, rootPath string, regGen core.Generation) error
 	EnsureActiveGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation, fingerprint string) error
 	PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error
 	CommitUpdate(ctx context.Context, req core.CommitRequest, job core.Job) error
+	WorktreeViewPaths(ctx context.Context, wt core.WorktreeID) ([]string, error)
+	DeleteWorktreeView(ctx context.Context, wt core.WorktreeID, relPath string) error
 }
 
-// Stats summarizes an import for reconciliation against the source.
+// Stats summarizes an import. Document/placement counts are read back from the
+// catalog after the import (durable), not inferred from the attempted work.
 type Stats struct {
-	Documents           int // documents seen in the source index
-	Chunks              int // chunk placements committed (artifact_chunks rows)
+	SourceDocuments     int // documents present in the source index
+	CommittedDocuments  int // documents now visible in the catalog view (durable)
+	ChunkPlacements     int // artifact_chunks committed across all views
 	UniqueVectors       int // distinct content-addressed vectors written
 	SkippedMissingChunk int // dangling chunk-id references skipped
+	PrunedStaleViews    int // views removed that no longer exist in the source
 }
 
 // Import writes a decoded v1 index into the v2 catalog as a single active
 // generation, reusing the tested PutChunkVector + CommitUpdate seams (no new
-// core write path). Chunks are content-addressed (core.ChunkID), so identical
-// content across files collapses to one stored vector while each document keeps
-// its own ordered composition. SourceHash is the v1 Document.Hash, so the import
-// is self-contained (no git checkout, no network). Idempotent: re-running writes
-// the same rows and yields the same Stats.
+// core write path). It refuses to write into a catalog that already holds a
+// different active generation (protecting a native catalog_v2.db and rejecting
+// mixed imports), prunes views for source files that have disappeared, and reads
+// the committed document set back from the catalog so Stats reflect reality.
+//
+// Chunk identity is content-addressed on the v1 ContentHash — v1's own
+// vector-cache key (LookupByContentHash) — so distinct embeddings never collapse
+// even when display content coincides; identical embeddings dedupe. SourceHash
+// is the v1 Document.Hash, so the import is self-contained (no git, no network).
+// Idempotent: re-running the same index writes the same rows and Stats.
 func Import(ctx context.Context, cat CatalogWriter, repo core.RepositoryID, wt core.WorktreeID, root string, idx LegacyIndex, fingerprint string) (Stats, error) {
 	var st Stats
+
+	// Ownership guard: only a fresh catalog, or a re-import of the same migrated
+	// generation (gen 1, matching fingerprint), may be written. Anything else — a
+	// native v2 catalog, or a different v1 index — is refused so views never mix.
+	activeGen, err := cat.ActiveGeneration(ctx, repo)
+	if err != nil {
+		return st, fmt.Errorf("read active generation: %w", err)
+	}
+	if activeGen != 0 {
+		activeFP, err := cat.GenerationFingerprint(ctx, repo, activeGen)
+		if err != nil {
+			return st, fmt.Errorf("read active fingerprint: %w", err)
+		}
+		if activeGen != migrationGeneration || activeFP != fingerprint {
+			return st, fmt.Errorf("catalog already has active generation %d (fingerprint %s); import into a dedicated migration catalog", activeGen, activeFP)
+		}
+	}
+
 	if err := cat.RegisterRepository(ctx, repo, root, ""); err != nil {
 		return st, fmt.Errorf("register repository: %w", err)
 	}
@@ -55,7 +85,8 @@ func Import(ctx context.Context, cat CatalogWriter, repo core.RepositoryID, wt c
 		return st, fmt.Errorf("bootstrap generation: %w", err)
 	}
 
-	st.Documents = len(idx.Documents)
+	st.SourceDocuments = len(idx.Documents)
+	committed := make(map[string]struct{})
 	seen := make(map[string]struct{})
 
 	// Deterministic document order so the import is reproducible.
@@ -76,7 +107,7 @@ func Import(ctx context.Context, cat CatalogWriter, repo core.RepositoryID, wt c
 				st.SkippedMissingChunk++
 				continue
 			}
-			chunkID := core.ChunkID(fingerprint, ch.Content)
+			chunkID := core.ChunkID(fingerprint, vectorIdentity(ch))
 			if err := cat.PutChunkVector(ctx, chunkID, repo, fingerprint, ch.Vector, ch.Content); err != nil {
 				return st, fmt.Errorf("put chunk vector (%s): %w", p, err)
 			}
@@ -105,25 +136,72 @@ func Import(ctx context.Context, cat CatalogWriter, repo core.RepositoryID, wt c
 		if err := cat.CommitUpdate(ctx, core.CommitRequest{View: view, Artifact: art, Chunks: artChunks}, core.Job{}); err != nil {
 			return st, fmt.Errorf("commit view (%s): %w", p, err)
 		}
-		st.Chunks += len(artChunks)
+		committed[doc.Path] = struct{}{}
+		st.ChunkPlacements += len(artChunks)
 	}
+
+	// Prune views for files that no longer exist in the source index (a re-import
+	// after files were deleted from the repo and v1 re-indexed).
+	existing, err := cat.WorktreeViewPaths(ctx, wt)
+	if err != nil {
+		return st, fmt.Errorf("list views: %w", err)
+	}
+	for _, p := range existing {
+		if _, ok := committed[p]; !ok {
+			if err := cat.DeleteWorktreeView(ctx, wt, p); err != nil {
+				return st, fmt.Errorf("prune stale view (%s): %w", p, err)
+			}
+			st.PrunedStaleViews++
+		}
+	}
+
+	// Durable committed-document count: read the view back rather than trusting
+	// the attempted work.
+	final, err := cat.WorktreeViewPaths(ctx, wt)
+	if err != nil {
+		return st, fmt.Errorf("count views: %w", err)
+	}
+	st.CommittedDocuments = len(final)
 	return st, nil
 }
 
-// Reconcile checks that an import accounted for every source document and every
-// (non-dangling) chunk placement. It returns a human-readable detail either way.
-func Reconcile(idx LegacyIndex, st Stats) (bool, string) {
-	wantDocs := len(idx.Documents)
-	wantChunks := 0
-	for _, d := range idx.Documents {
-		wantChunks += len(d.ChunkIDs)
+// vectorIdentity returns the value that uniquely identifies a chunk's embedding.
+// v1 keyed its vector cache on ContentHash (store.LookupByContentHash), so equal
+// ContentHash implies equal embedding input and vector; it falls back to display
+// content only when a legacy chunk carries no ContentHash.
+func vectorIdentity(ch LegacyChunk) string {
+	if ch.ContentHash != "" {
+		return ch.ContentHash
 	}
-	wantChunks -= st.SkippedMissingChunk
+	return ch.Content
+}
 
-	if st.Documents == wantDocs && st.Chunks == wantChunks {
-		return true, fmt.Sprintf("reconciled: %d documents, %d chunk placements (%d unique vectors, %d dangling skipped)",
-			st.Documents, st.Chunks, st.UniqueVectors, st.SkippedMissingChunk)
+// Reconcile verifies an import against the source index: every source document
+// with at least one resolvable chunk must be committed and searchable, and the
+// committed chunk placements must equal the resolvable chunk references. It
+// compares the durable Stats (read back from the catalog) against expectations
+// derived from the source, so a document whose chunks all dangled — which commits
+// no view — is correctly excluded rather than silently counted as success.
+func Reconcile(idx LegacyIndex, st Stats) (bool, string) {
+	expectedDocs := 0
+	expectedPlacements := 0
+	for _, d := range idx.Documents {
+		usable := 0
+		for _, cid := range d.ChunkIDs {
+			if _, ok := idx.Chunks[cid]; ok {
+				usable++
+			}
+		}
+		if usable > 0 {
+			expectedDocs++
+		}
+		expectedPlacements += usable
 	}
-	return false, fmt.Sprintf("MISMATCH: documents %d/%d, chunk placements %d/%d (%d dangling skipped)",
-		st.Documents, wantDocs, st.Chunks, wantChunks, st.SkippedMissingChunk)
+
+	if st.CommittedDocuments == expectedDocs && st.ChunkPlacements == expectedPlacements {
+		return true, fmt.Sprintf("reconciled: %d/%d documents committed, %d chunk placements (%d unique vectors, %d dangling skipped, %d stale views pruned)",
+			st.CommittedDocuments, expectedDocs, st.ChunkPlacements, st.UniqueVectors, st.SkippedMissingChunk, st.PrunedStaleViews)
+	}
+	return false, fmt.Sprintf("MISMATCH: documents committed %d/%d, chunk placements %d/%d (%d dangling skipped, %d stale pruned)",
+		st.CommittedDocuments, expectedDocs, st.ChunkPlacements, expectedPlacements, st.SkippedMissingChunk, st.PrunedStaleViews)
 }
