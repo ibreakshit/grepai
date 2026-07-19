@@ -17,6 +17,7 @@ var (
 	_ service.Catalog         = (*Set)(nil)
 	_ worker.Catalog          = (*Set)(nil)
 	_ reconcile.CatalogReader = (*Set)(nil)
+	_ worker.Builder          = (*BuilderRouter)(nil)
 )
 
 // --- routed by explicit repo id ---
