@@ -95,6 +95,27 @@ func (c *Catalog) WorktreePendingCount(ctx context.Context, wt core.WorktreeID) 
 	return n, err
 }
 
+// WorktreeViewPaths returns the relative paths currently visible in a
+// worktree's active view (one row per committed file). Sorted for deterministic
+// consumption. Used by migration to durably verify and prune imported views.
+func (c *Catalog) WorktreeViewPaths(ctx context.Context, wt core.WorktreeID) ([]string, error) {
+	rows, err := c.db.QueryContext(ctx,
+		`SELECT relative_path FROM worktree_files WHERE worktree_id=? ORDER BY relative_path`, string(wt))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
 // WorktreePathsPending reports whether any of paths has a pending job for the
 // worktree, evaluated in a single statement so the set is checked against one
 // consistent snapshot (a job appearing on one path while another completes can
