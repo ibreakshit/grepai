@@ -753,3 +753,15 @@ func TestValidateWatchConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestEngineV2Detection(t *testing.T) {
+	if (&Config{}).EngineV2() {
+		t.Fatal("empty engine must be v1")
+	}
+	if (&Config{Engine: "v1"}).EngineV2() {
+		t.Fatal("v1 must not be v2")
+	}
+	if !(&Config{Engine: "v2"}).EngineV2() {
+		t.Fatal("v2 must be detected")
+	}
+}
