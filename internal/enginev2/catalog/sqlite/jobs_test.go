@@ -87,6 +87,35 @@ func TestCommitDeleteRemovesView(t *testing.T) {
 	}
 }
 
+// A commit for a non-active generation (a controlled rebuild building a new
+// generation) must NOT switch the active worktree view — the active generation
+// stays queryable during a rebuild (invariant 12, Codex Phase 5 review #1).
+func TestCommitAtNonActiveGenerationDoesNotSwitchView(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "r", "w")
+	seedGeneration(t, c, "r", 1, "fp") // gen 1 active
+
+	artA := mkArtifact("r", "a.go", "h1", "fp")
+	must(t, c.CommitUpdate(ctx,
+		core.CommitRequest{View: core.ViewEntry{WorktreeID: "w", Path: "a.go", ArtifactID: artA.ID, Generation: 1}, Artifact: artA},
+		core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert}))
+	if id, ok, _ := c.ResolveView(ctx, "w", "a.go"); !ok || id != artA.ID {
+		t.Fatal("gen 1 view should be set")
+	}
+
+	// gen 2 is created but NOT activated (a building rebuild generation).
+	must(t, c.CreateGeneration(ctx, "r", 2, "fp2"))
+	artB := mkArtifact("r", "a.go", "h2", "fp2")
+	must(t, c.CommitUpdate(ctx,
+		core.CommitRequest{View: core.ViewEntry{WorktreeID: "w", Path: "a.go", ArtifactID: artB.ID, Generation: 2}, Artifact: artB},
+		core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h2", Generation: 2, Operation: core.OpUpsert}))
+	// The active view must still resolve to the gen-1 artifact.
+	if id, _, _ := c.ResolveView(ctx, "w", "a.go"); id != artA.ID {
+		t.Fatalf("active view must stay gen 1 during rebuild: got %s want %s", id, artA.ID)
+	}
+}
+
 func TestCommitDeleteSupersededKeepsNewerUpsert(t *testing.T) {
 	ctx := context.Background()
 	c := newTestCatalog(t)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
@@ -42,6 +43,11 @@ func (c *Catalog) SearchWorktree(ctx context.Context, wt core.WorktreeID, query 
 			return nil, err
 		}
 		s := cosine(query, vec)
+		// Skip non-finite scores (a NaN/Inf in a stored or query vector) so they
+		// can never become a path's "best" score or break the sort's total order.
+		if math.IsNaN(float64(s)) || math.IsInf(float64(s), 0) {
+			continue
+		}
 		if cur, ok := best[path]; !ok || s > cur {
 			best[path] = s
 		}
@@ -87,18 +93,25 @@ func (c *Catalog) WorktreePendingCount(ctx context.Context, wt core.WorktreeID) 
 }
 
 // WorktreePathsPending reports whether any of paths has a pending job for the
-// worktree. An empty paths slice reports false (nothing to wait on).
+// worktree, evaluated in a single statement so the set is checked against one
+// consistent snapshot (a job appearing on one path while another completes can
+// never be missed). An empty paths slice reports false (nothing to wait on).
 func (c *Catalog) WorktreePathsPending(ctx context.Context, wt core.WorktreeID, paths []string) (bool, error) {
-	for _, p := range paths {
-		var n int
-		if err := c.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM index_jobs WHERE worktree_id=? AND relative_path=?`,
-			string(wt), p).Scan(&n); err != nil {
-			return false, err
-		}
-		if n > 0 {
-			return true, nil
-		}
+	if len(paths) == 0 {
+		return false, nil
 	}
-	return false, nil
+	placeholders := make([]string, len(paths))
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, string(wt))
+	for i, p := range paths {
+		placeholders[i] = "?"
+		args = append(args, p)
+	}
+	q := `SELECT COUNT(*) FROM index_jobs WHERE worktree_id=? AND relative_path IN (` +
+		strings.Join(placeholders, ",") + `)`
+	var n int
+	if err := c.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

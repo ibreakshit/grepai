@@ -46,17 +46,37 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 	if err := putArtifactChunksTx(ctx, tx, req.Artifact.ID, req.Chunks); err != nil {
 		return err
 	}
+	// Invariant 12 (search availability): a commit for a generation other than
+	// the repository's active one — e.g. a controlled rebuild building a new
+	// generation — stores the shared immutable artifact but must NOT switch the
+	// active worktree view, so the active generation stays queryable until the
+	// rebuild is activated. When no generation is active yet (fresh/bootstrap),
+	// the switch proceeds.
+	switchView := true
+	var active sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT g.generation FROM index_generations g
+		JOIN worktrees w ON w.repository_id = g.repository_id
+		WHERE w.worktree_id=? AND g.status='active'`,
+		string(req.View.WorktreeID)).Scan(&active); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if active.Valid && active.Int64 != int64(req.View.Generation) {
+		switchView = false
+	}
 	// Switch the view only if this generation is at least as new as the one
 	// currently recorded — a superseded (older-generation) commit must not
 	// regress the worktree view (spec §5.6: only the newest generation commits).
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO worktree_files(worktree_id, relative_path, artifact_id, generation, updated_at)
-		VALUES(?, ?, ?, ?, datetime('now'))
-		ON CONFLICT(worktree_id, relative_path) DO UPDATE SET
-			artifact_id=excluded.artifact_id, generation=excluded.generation, updated_at=excluded.updated_at
-		WHERE excluded.generation >= worktree_files.generation`,
-		string(req.View.WorktreeID), req.View.Path, string(req.View.ArtifactID), int64(req.View.Generation)); err != nil {
-		return err
+	if switchView {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO worktree_files(worktree_id, relative_path, artifact_id, generation, updated_at)
+			VALUES(?, ?, ?, ?, datetime('now'))
+			ON CONFLICT(worktree_id, relative_path) DO UPDATE SET
+				artifact_id=excluded.artifact_id, generation=excluded.generation, updated_at=excluded.updated_at
+			WHERE excluded.generation >= worktree_files.generation`,
+			string(req.View.WorktreeID), req.View.Path, string(req.View.ArtifactID), int64(req.View.Generation)); err != nil {
+			return err
+		}
 	}
 	// Complete only the exact job this commit fulfills: same generation and the
 	// same desired hash. A newer pending intent — a higher generation, or the

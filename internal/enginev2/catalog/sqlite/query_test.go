@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -62,6 +63,48 @@ func TestSearchWorktreeIsolationAndRanking(t *testing.T) {
 	}
 	if len(h2) != 1 || h2[0].Path != "secret.go" {
 		t.Fatalf("w2 search wrong: %+v", h2)
+	}
+}
+
+// A stored non-finite (NaN) vector must be skipped, never becoming a path's
+// best score nor corrupting the ranking (Codex Phase 5 review #4).
+func TestSearchWorktreeSkipsNonFiniteVectors(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	emb := enginetest.NewFakeEmbedder(4)
+	seedRepoWorktree(t, c, "r", "w")
+	seedGeneration(t, c, "r", 1, "fp")
+	putArtifact(t, c, emb, "w", "good.go", "good")
+
+	// Commit a NaN-vector artifact for bad.go directly.
+	nan := []float32{float32(math.NaN()), 0, 0, 0}
+	chID := core.ChunkID("fp", "badcontent")
+	must(t, c.PutChunkVector(ctx, chID, "r", "fp", nan))
+	key := core.ArtifactKey{RepositoryID: "r", RelativePath: "bad.go", SourceHash: "hbad", Fingerprint: "fp"}
+	art := core.Artifact{ID: key.ArtifactID(), Key: key, Dimensions: 4, Chunks: []core.ArtifactChunk{{Ordinal: 0, ChunkID: chID, Vector: nan}}}
+	must(t, c.CommitUpdate(ctx,
+		core.CommitRequest{View: core.ViewEntry{WorktreeID: "w", Path: "bad.go", ArtifactID: key.ArtifactID(), Generation: 1}, Artifact: art, Chunks: art.Chunks},
+		core.Job{WorktreeID: "w", Path: "bad.go", DesiredHash: "hbad", Generation: 1, Operation: core.OpUpsert}))
+
+	q, err := emb.Embed(ctx, "good")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := c.SearchWorktree(ctx, "w", q, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := false
+	for _, h := range hits {
+		if h.Path == "bad.go" {
+			t.Fatal("a non-finite stored vector must be skipped")
+		}
+		if h.Path == "good.go" {
+			good = true
+		}
+	}
+	if !good {
+		t.Fatal("good.go should still rank")
 	}
 }
 

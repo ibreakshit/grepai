@@ -27,7 +27,7 @@ func newServer(t *testing.T) (*sqlite.Catalog, *enginetest.FakeEmbedder, *servic
 	t.Helper()
 	c := newCatalog(t)
 	emb := enginetest.NewFakeEmbedder(4)
-	return c, emb, service.New(c, reconcile.New(c), emb, 10)
+	return c, emb, service.New(c, reconcile.New(c), emb, "fp", 10)
 }
 
 // seedWorktreeArtifact registers repo/wt, ensures an active gen 1 (fp "fp"), and
@@ -122,7 +122,7 @@ func TestWaitFreshImmediateAndTimeout(t *testing.T) {
 
 func TestRegisterAndRebuild(t *testing.T) {
 	ctx := context.Background()
-	c, _, s := newServer(t)
+	_, _, s := newServer(t)
 	reg, err := s.Register(ctx, service.RegisterRequest{Root: "/repo/x"})
 	if err != nil {
 		t.Fatal(err)
@@ -130,12 +130,10 @@ func TestRegisterAndRebuild(t *testing.T) {
 	if reg.RepositoryID != "/repo/x" || reg.WorktreeID != "/repo/x" {
 		t.Fatalf("register ids wrong: %+v", reg)
 	}
-	// Seed an active gen so Rebuild can carry the fingerprint forward.
-	if err := c.CreateGeneration(ctx, reg.RepositoryID, 1, "fp"); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.SetActiveGeneration(ctx, reg.RepositoryID, 1); err != nil {
-		t.Fatal(err)
+	// Register bootstrapped an active generation 1, so Status/Rebuild work.
+	st, err := s.Status(ctx, service.StatusRequest{WorktreeID: reg.WorktreeID})
+	if err != nil || st.ActiveGeneration != 1 {
+		t.Fatalf("register should bootstrap active gen 1: st=%+v err=%v", st, err)
 	}
 	rb, err := s.Rebuild(ctx, service.RebuildRequest{RepositoryID: reg.RepositoryID})
 	if err != nil {
@@ -143,6 +141,42 @@ func TestRegisterAndRebuild(t *testing.T) {
 	}
 	if rb.Generation != 2 {
 		t.Fatalf("rebuild should create generation 2, got %d", rb.Generation)
+	}
+}
+
+func TestWaitFreshUnknownWorktreeErrors(t *testing.T) {
+	ctx := context.Background()
+	_, _, s := newServer(t)
+	// An unknown worktree must not be reported "fresh" just because it has no jobs.
+	if _, err := s.WaitFresh(ctx, service.WaitFreshRequest{WorktreeID: "nope", Paths: []string{"a.go"}}); err == nil {
+		t.Fatal("WaitFresh on an unregistered worktree must error, not report fresh")
+	}
+}
+
+// badEmbedder returns a wrong-dimension vector to exercise query validation.
+type badEmbedder struct{ dims int }
+
+func (b badEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return make([]float32, b.dims-1), nil // one short
+}
+func (b badEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	return make([][]float32, len(texts)), nil
+}
+func (b badEmbedder) Dimensions() int { return b.dims }
+func (b badEmbedder) Close() error    { return nil }
+
+func TestSearchRejectsBadQueryVector(t *testing.T) {
+	ctx := context.Background()
+	c := newCatalog(t)
+	s := service.New(c, reconcile.New(c), badEmbedder{dims: 4}, "fp", 10)
+	if err := c.RegisterRepository(ctx, "r", "/r", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RegisterWorktree(ctx, "w", "r", "/w", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Search(ctx, service.SearchRequest{WorktreeID: "w", Query: "x"}); err == nil {
+		t.Fatal("Search must reject a query embedding of the wrong dimension")
 	}
 }
 

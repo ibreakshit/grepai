@@ -82,7 +82,7 @@ func TestGate5_QueryMakesNoIndexingCalls(t *testing.T) {
 	c := newCatalog(t)
 	fake := enginetest.NewFakeEmbedder(4)
 	ce := &countingEmbedder{inner: fake}
-	s := service.New(c, reconcile.New(c), ce, 10)
+	s := service.New(c, reconcile.New(c), ce, "fp", 10)
 	seedWorktreeArtifact(t, c, fake, "r", "w", "a.go", "alpha") // seeds via fake, not the server
 
 	before, _ := c.WorktreePendingCount(ctx, "w")

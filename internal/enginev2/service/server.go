@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"math"
 	"time"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -20,6 +23,7 @@ type Catalog interface {
 	ActiveGeneration(ctx context.Context, repo core.RepositoryID) (core.Generation, error)
 	GenerationFingerprint(ctx context.Context, repo core.RepositoryID, gen core.Generation) (string, error)
 	CreateGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation, fingerprint string) error
+	SetActiveGeneration(ctx context.Context, repo core.RepositoryID, gen core.Generation) error
 	SearchWorktree(ctx context.Context, wt core.WorktreeID, query []float32, limit int) ([]core.SearchHit, error)
 	WorktreePendingCount(ctx context.Context, wt core.WorktreeID) (int, error)
 	WorktreePathsPending(ctx context.Context, wt core.WorktreeID, paths []string) (bool, error)
@@ -36,25 +40,30 @@ type Reconciler interface {
 // Status, WaitFresh, Trace) only read and embed the query — they never enqueue
 // index jobs or reconcile (invariant 3). Only Register/Reconcile/Rebuild mutate.
 type Server struct {
-	cat   Catalog
-	rec   Reconciler
-	emb   embedder.Embedder
-	limit int
+	cat         Catalog
+	rec         Reconciler
+	emb         embedder.Embedder
+	fingerprint string
+	limit       int
 }
 
 var _ Service = (*Server)(nil)
 
-// New constructs a Server. searchLimit below 1 defaults to 10.
-func New(cat Catalog, rec Reconciler, emb embedder.Embedder, searchLimit int) *Server {
+// New constructs a Server. fingerprint is the current indexing fingerprint used
+// to bootstrap a repository's first generation at registration; it must match
+// emb (provider/model/dimensions/chunker). searchLimit below 1 defaults to 10.
+func New(cat Catalog, rec Reconciler, emb embedder.Embedder, fingerprint string, searchLimit int) *Server {
 	if searchLimit < 1 {
 		searchLimit = 10
 	}
-	return &Server{cat: cat, rec: rec, emb: emb, limit: searchLimit}
+	return &Server{cat: cat, rec: rec, emb: emb, fingerprint: fingerprint, limit: searchLimit}
 }
 
-// Register registers a repository and worktree from a canonical root path. This
-// phase derives both ids from the root (single-worktree registration); richer
-// git-common-dir identity derivation is a later refinement.
+// Register registers a repository and worktree from a canonical root path and
+// bootstraps an active generation 1 (so reconcile, indexing, status, and
+// rebuild work immediately). This phase derives both ids from the root
+// (single-worktree registration); richer git-common-dir identity derivation is
+// a later refinement.
 func (s *Server) Register(ctx context.Context, req RegisterRequest) (RegisterResponse, error) {
 	repo := core.RepositoryID(req.Root)
 	wt := core.WorktreeID(req.Root)
@@ -63,6 +72,18 @@ func (s *Server) Register(ctx context.Context, req RegisterRequest) (RegisterRes
 	}
 	if err := s.cat.RegisterWorktree(ctx, wt, repo, req.Root, 1); err != nil {
 		return RegisterResponse{}, err
+	}
+	active, err := s.cat.ActiveGeneration(ctx, repo)
+	if err != nil {
+		return RegisterResponse{}, err
+	}
+	if active == 0 {
+		if err := s.cat.CreateGeneration(ctx, repo, 1, s.fingerprint); err != nil {
+			return RegisterResponse{}, err
+		}
+		if err := s.cat.SetActiveGeneration(ctx, repo, 1); err != nil {
+			return RegisterResponse{}, err
+		}
 	}
 	return RegisterResponse{RepositoryID: repo, WorktreeID: wt}, nil
 }
@@ -87,6 +108,9 @@ func (s *Server) Reconcile(ctx context.Context, req ReconcileRequest) (Reconcile
 func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	q, err := s.emb.Embed(ctx, req.Query)
 	if err != nil {
+		return SearchResponse{}, err
+	}
+	if err := validateQueryVector(q, s.emb.Dimensions()); err != nil {
 		return SearchResponse{}, err
 	}
 	hits, err := s.cat.SearchWorktree(ctx, req.WorktreeID, q, s.limit)
@@ -128,6 +152,11 @@ func (s *Server) Status(ctx context.Context, req StatusRequest) (StatusResponse,
 // context deadline is reached (in which case it returns Fresh:false, nil — a
 // timeout is not an error). An empty Paths slice is immediately fresh.
 func (s *Server) WaitFresh(ctx context.Context, req WaitFreshRequest) (WaitFreshResponse, error) {
+	// Validate the worktree first: an unknown worktree must not report "fresh"
+	// just because it has no jobs.
+	if _, _, err := s.cat.WorktreeInfo(ctx, req.WorktreeID); err != nil {
+		return WaitFreshResponse{}, err
+	}
 	ticker := time.NewTicker(waitFreshPoll)
 	defer ticker.Stop()
 	for {
@@ -179,6 +208,21 @@ func (s *Server) Rebuild(ctx context.Context, req RebuildRequest) (RebuildRespon
 func (s *Server) DeadLetters(_ context.Context, req DeadLetterRequest) (DeadLetterResponse, error) {
 	_ = req
 	return DeadLetterResponse{Paths: nil}, nil
+}
+
+// validateQueryVector rejects a query embedding whose length does not match the
+// embedder's dimension or that contains non-finite values — either would
+// silently corrupt (empty or NaN) ranking rather than surface the error.
+func validateQueryVector(q []float32, dims int) error {
+	if len(q) != dims {
+		return fmt.Errorf("service: query embedding has %d dimensions, want %d", len(q), dims)
+	}
+	for _, v := range q {
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return errors.New("service: query embedding contains a non-finite value")
+		}
+	}
+	return nil
 }
 
 // genAndPending resolves a worktree's repository, its active generation, and its
