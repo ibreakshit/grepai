@@ -27,7 +27,7 @@ import (
 )
 
 // run assembles the daemon over the host paths + config and serves until ctx is
-// cancelled. It is separate from main (no signal handling / os.Exit) so tests
+// canceled. It is separate from main (no signal handling / os.Exit) so tests
 // can drive it with a cancelable context.
 func run(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Config, logw io.Writer) error {
 	emb, err := embedder.NewFromConfig(cfg.ToConfig())
