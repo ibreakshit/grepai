@@ -13,6 +13,7 @@ type Stats struct {
 	InFlight             int
 	ReservedQuery        int
 	QueueDepthByPriority map[core.Priority]int
+	Circuit              string // "closed" | "open" | "half-open"
 }
 
 // Scheduler admits and paces all backend work under one host-wide budget

@@ -228,6 +228,7 @@ func (e *Engine) Stats() Stats {
 		InFlight:             e.inFlight,
 		ReservedQuery:        len(e.querySlots),
 		QueueDepthByPriority: depth,
+		Circuit:              e.breaker.State(),
 	}
 }
 
