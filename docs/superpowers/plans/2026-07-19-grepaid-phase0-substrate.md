@@ -130,13 +130,17 @@ Expected: FAIL — `c.SchemaVersion undefined` / `undefined: LatestSchemaVersion
 
 - [ ] **Step 3: Add the accessor + constant**
 
-In `schema.go`, immediately after `var migrations = []string{migration0001, migration0002}` add:
+`schema.go` already defines `const schemaVersion = 2` (the version the binary migrates to — the single source of truth). Export it and the accessor rather than adding a parallel `len(migrations)` value. Immediately after `const schemaVersion = 2` add:
 
 ```go
 // LatestSchemaVersion is the schema version this binary migrates a catalog to.
 // The daemon refuses to open a catalog stamped newer than this.
-var LatestSchemaVersion = len(migrations)
+const LatestSchemaVersion = schemaVersion
+```
 
+and near `func (c *Catalog) schemaVersion` add:
+
+```go
 // SchemaVersion returns the highest applied migration version (0 on a fresh DB).
 // Exported so the daemon can guard against opening a catalog written by a newer
 // binary (schema too new -> skip rather than risk corruption).

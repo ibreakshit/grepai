@@ -63,3 +63,22 @@ func TestMigrateAppliesSchemaOnce(t *testing.T) {
 		t.Fatalf("reopened schema version = %d, want %d", v2, schemaVersion)
 	}
 }
+
+func TestSchemaVersionMatchesLatestAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	c, err := Open(context.Background(), filepath.Join(dir, "c.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer c.Close()
+	v, err := c.SchemaVersion(context.Background())
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if v != LatestSchemaVersion {
+		t.Fatalf("freshly opened catalog is at schema %d, want LatestSchemaVersion=%d", v, LatestSchemaVersion)
+	}
+	if LatestSchemaVersion < 1 {
+		t.Fatalf("LatestSchemaVersion must be >= 1, got %d", LatestSchemaVersion)
+	}
+}
