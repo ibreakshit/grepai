@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -66,5 +67,26 @@ func TestRegisterWorktreeRequiresRepository(t *testing.T) {
 	// Foreign key: worktree for an unregistered repo must fail.
 	if err := c.RegisterWorktree(ctx, "wt1", "ghost", "/x", 1); err == nil {
 		t.Fatal("expected FK error registering worktree for unknown repository")
+	}
+}
+
+func TestSetActiveGenerationRejectsUnknown(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	if err := c.RegisterRepository(ctx, "repo1", "/r", ""); err != nil {
+		t.Fatalf("repo: %v", err)
+	}
+	if err := c.CreateGeneration(ctx, "repo1", 1, "fp"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := c.SetActiveGeneration(ctx, "repo1", 1); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	// Activating a nonexistent generation must error AND must not clear the active one.
+	if err := c.SetActiveGeneration(ctx, "repo1", 99); !errors.Is(err, ErrNoSuchGeneration) {
+		t.Fatalf("expected ErrNoSuchGeneration, got %v", err)
+	}
+	if g, _ := c.ActiveGeneration(ctx, "repo1"); g != 1 {
+		t.Fatalf("active generation cleared to %d; must remain 1", g)
 	}
 }

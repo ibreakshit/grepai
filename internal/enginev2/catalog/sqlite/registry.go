@@ -3,9 +3,13 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
+
+// ErrNoSuchGeneration is returned when activating a generation that was never created.
+var ErrNoSuchGeneration = errors.New("catalog/sqlite: generation does not exist")
 
 // RegisterRepository idempotently records a repository namespace.
 func (c *Catalog) RegisterRepository(ctx context.Context, repo core.RepositoryID, rootPath, gitCommonDir string) error {
@@ -50,10 +54,20 @@ func (c *Catalog) SetActiveGeneration(ctx context.Context, repo core.RepositoryI
 			WHERE repository_id=? AND status='active'`, string(repo)); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			UPDATE index_generations SET status='active'
 			WHERE repository_id=? AND generation=?`, string(repo), int64(gen))
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNoSuchGeneration
+		}
+		return nil
 	})
 }
 
@@ -63,7 +77,7 @@ func (c *Catalog) ActiveGeneration(ctx context.Context, repo core.RepositoryID) 
 	err := c.db.QueryRowContext(ctx, `
 		SELECT generation FROM index_generations
 		WHERE repository_id=? AND status='active'`, string(repo)).Scan(&gen)
-	if err == sql.ErrNoRows || !gen.Valid {
+	if errors.Is(err, sql.ErrNoRows) || !gen.Valid {
 		return 0, nil
 	}
 	if err != nil {

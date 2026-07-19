@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
@@ -36,7 +37,7 @@ func (c *Catalog) GetArtifact(ctx context.Context, key core.ArtifactKey) (core.A
 		SELECT artifact_id, dimensions FROM file_artifacts
 		WHERE repository_id=? AND relative_path=? AND source_hash=? AND fingerprint=?`,
 		string(key.RepositoryID), key.RelativePath, key.SourceHash, key.Fingerprint).Scan(&id, &dims)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return core.Artifact{}, false, nil
 	}
 	if err != nil {
@@ -64,7 +65,7 @@ func (c *Catalog) GetChunkVector(ctx context.Context, chunkID string) ([]float32
 	var blob []byte
 	err := c.db.QueryRowContext(ctx, `
 		SELECT dimensions, vector FROM chunks WHERE chunk_id=?`, chunkID).Scan(&dims, &blob)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
 	if err != nil {

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/catalog"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -17,7 +18,7 @@ func (c *Catalog) ResolveView(ctx context.Context, wt core.WorktreeID, relPath s
 	err := c.db.QueryRowContext(ctx, `
 		SELECT artifact_id FROM worktree_files WHERE worktree_id=? AND relative_path=?`,
 		string(wt), relPath).Scan(&id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -42,17 +43,24 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 	if err := putArtifactTx(ctx, tx, req.Artifact); err != nil {
 		return err
 	}
+	// Switch the view only if this generation is at least as new as the one
+	// currently recorded — a superseded (older-generation) commit must not
+	// regress the worktree view (spec §5.6: only the newest generation commits).
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO worktree_files(worktree_id, relative_path, artifact_id, generation, updated_at)
 		VALUES(?, ?, ?, ?, datetime('now'))
 		ON CONFLICT(worktree_id, relative_path) DO UPDATE SET
-			artifact_id=excluded.artifact_id, generation=excluded.generation, updated_at=excluded.updated_at`,
+			artifact_id=excluded.artifact_id, generation=excluded.generation, updated_at=excluded.updated_at
+		WHERE excluded.generation >= worktree_files.generation`,
 		string(req.View.WorktreeID), req.View.Path, string(req.View.ArtifactID), int64(req.View.Generation)); err != nil {
 		return err
 	}
+	// Complete only a job at or below the committed generation. A newer pending
+	// generation (a supersede that arrived while this work ran) must survive so
+	// its own commit can run.
 	_, err := tx.ExecContext(ctx, `
-		DELETE FROM index_jobs WHERE worktree_id=? AND relative_path=?`,
-		string(job.WorktreeID), job.Path)
+		DELETE FROM index_jobs WHERE worktree_id=? AND relative_path=? AND generation<=?`,
+		string(job.WorktreeID), job.Path, int64(req.View.Generation))
 	return err
 }
 
@@ -101,7 +109,7 @@ func (c *Catalog) ClaimNextJob(ctx context.Context, minPriority core.Priority) (
 			ORDER BY priority ASC, job_id ASC
 			LIMIT 1`, int(minPriority))
 		if err := row.Scan(&jobID, &wt, &path, &hash, &gen, &op, &prio, &att); err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
 			return err

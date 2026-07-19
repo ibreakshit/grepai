@@ -117,3 +117,30 @@ func TestClaimNextJobPriorityOrder(t *testing.T) {
 		t.Fatal("no job at/above interactive priority should be claimable")
 	}
 }
+
+func TestCommitUpdateSupersededDoesNotDropNewerJob(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "repo1", "wt1")
+	if err := c.UpsertJob(ctx, core.Job{WorktreeID: "wt1", Path: "a.go", Generation: 1, DesiredHash: "h1", Priority: core.PriorityLiveChange, Operation: core.OpUpsert}); err != nil {
+		t.Fatalf("upsert1: %v", err)
+	}
+	if err := c.UpsertJob(ctx, core.Job{WorktreeID: "wt1", Path: "a.go", Generation: 2, DesiredHash: "h2", Priority: core.PriorityLiveChange, Operation: core.OpUpsert}); err != nil {
+		t.Fatalf("upsert2: %v", err)
+	}
+	// A worker that started on the now-stale gen1 commits gen1.
+	v1 := mkArtifact("repo1", "a.go", "h1", "fp")
+	if err := c.CommitUpdate(ctx,
+		core.CommitRequest{View: core.ViewEntry{WorktreeID: "wt1", Path: "a.go", ArtifactID: v1.ID, Generation: 1}, Artifact: v1},
+		core.Job{WorktreeID: "wt1", Path: "a.go", Generation: 1, Operation: core.OpUpsert}); err != nil {
+		t.Fatalf("commit gen1: %v", err)
+	}
+	// The newer gen2 job must survive the stale commit.
+	job, ok, err := c.ClaimNextJob(ctx, core.PriorityBootstrap)
+	if err != nil || !ok {
+		t.Fatalf("gen2 job must remain claimable: ok=%v err=%v", ok, err)
+	}
+	if job.Generation != 2 {
+		t.Fatalf("surviving job generation = %d, want 2", job.Generation)
+	}
+}
