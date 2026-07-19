@@ -7,9 +7,12 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/indexer"
@@ -78,6 +81,11 @@ func Open(ctx context.Context, catalogPath, root string, emb embedder.Embedder, 
 	if err != nil {
 		return nil, err
 	}
+	// Resolve symlinks so the same physical repository always maps to the same
+	// worktree id (whether reached directly or via a symlink).
+	if resolved, rerr := filepath.EvalSymlinks(absRoot); rerr == nil {
+		absRoot = resolved
+	}
 	dataDir := filepath.Dir(catalogPath)
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, err
@@ -106,6 +114,26 @@ func Open(ctx context.Context, catalogPath, root string, emb embedder.Embedder, 
 		_ = cat.Close()
 		return nil, err
 	}
+	// Guard against a fingerprint mismatch: Register bootstraps the active
+	// generation with `fingerprint` only on first use, so if the existing index
+	// was built with a different embedder/chunker (config changed), the runtime
+	// embedder and the stored vectors are incompatible — search would silently
+	// return nothing (or rank across vector spaces). Fail explicitly instead.
+	repo := core.RepositoryID(absRoot)
+	active, err := cat.ActiveGeneration(ctx, repo)
+	if err != nil {
+		_ = cat.Close()
+		return nil, err
+	}
+	activeFP, err := cat.GenerationFingerprint(ctx, repo, active)
+	if err != nil {
+		_ = cat.Close()
+		return nil, err
+	}
+	if activeFP != fingerprint {
+		_ = cat.Close()
+		return nil, fmt.Errorf("v2 index was built with a different embedder/chunker configuration; remove %q and re-run `grepai v2 index`", catalogPath)
+	}
 	return e, nil
 }
 
@@ -113,6 +141,16 @@ func Open(ctx context.Context, catalogPath, root string, emb embedder.Embedder, 
 // cache-miss chunks and atomically committing). It returns the number of jobs
 // queued and how many dead-lettered (e.g. a persistently unavailable endpoint).
 func (e *Engine) Index(ctx context.Context) (queued, deadLettered int, err error) {
+	// Clear any leftover jobs (e.g. from an interrupted prior run) so a stale job
+	// under an out-of-date desired identity is never processed; reconcile then
+	// re-derives the exact desired set from current truth.
+	if err := e.cat.DeleteJobsForWorktree(ctx, e.wt); err != nil {
+		return 0, 0, err
+	}
+	dlBefore, err := e.cat.DeadLetterCount(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
 	plan, err := e.rec.Reconcile(ctx, e.wt)
 	if err != nil {
 		return 0, 0, err
@@ -122,17 +160,15 @@ func (e *Engine) Index(ctx context.Context) (queued, deadLettered int, err error
 			return 0, 0, err
 		}
 	}
-	if _, err := e.wk.Recover(ctx); err != nil {
-		return 0, 0, err
-	}
 	if err := e.wk.Run(ctx); err != nil {
 		return 0, 0, err
 	}
-	dl, err := e.cat.DeadLetterCount(ctx)
+	dlAfter, err := e.cat.DeadLetterCount(ctx)
 	if err != nil {
 		return 0, 0, err
 	}
-	return len(plan.Jobs), dl, nil
+	// Report this invocation's counts: committed = queued - newly dead-lettered.
+	return len(plan.Jobs), dlAfter - dlBefore, nil
 }
 
 // Search returns ranked results (with snippets) for the worktree, plus the
@@ -148,12 +184,40 @@ func (e *Engine) Search(ctx context.Context, query string) ([]core.SearchHit, co
 // Close releases the catalog.
 func (e *Engine) Close() error { return e.cat.Close() }
 
-// ensureSelfIgnore writes a "*"-gitignore into dir if absent, so nothing in the
-// v2 data directory is ever indexed.
+// ensureSelfIgnore makes sure the v2 data directory ignores its own catalog
+// files, so reconciliation never indexes them. If no .gitignore exists it writes
+// one ignoring everything; if one exists it is preserved and the catalog
+// patterns are appended only when they are not already covered.
 func ensureSelfIgnore(dir string) error {
 	path := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(path); err == nil {
-		return nil // already present; do not clobber operator edits
+	patterns := []string{"catalog_v2.db", "catalog_v2.db-wal", "catalog_v2.db-shm"}
+	existing, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return os.WriteFile(path, []byte("*\n"), 0o600)
 	}
-	return os.WriteFile(path, []byte("*\n"), 0o600)
+	if err != nil {
+		return err
+	}
+	lines := map[string]bool{}
+	for _, ln := range strings.Split(string(existing), "\n") {
+		lines[strings.TrimSpace(ln)] = true
+	}
+	if lines["*"] {
+		return nil // everything already ignored
+	}
+	var missing []string
+	for _, p := range patterns {
+		if !lines[p] {
+			missing = append(missing, p)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	out := string(existing)
+	if len(out) > 0 && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	out += strings.Join(missing, "\n") + "\n"
+	return os.WriteFile(path, []byte(out), 0o600)
 }

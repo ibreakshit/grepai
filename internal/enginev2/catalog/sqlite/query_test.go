@@ -111,6 +111,38 @@ func TestSearchWorktreeSkipsNonFiniteVectors(t *testing.T) {
 	}
 }
 
+// A chunk row first written with empty content is repaired by a later writer's
+// non-empty content, but a non-empty content is then stable (never clobbered).
+func TestPutChunkVectorRepairsEmptyContent(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "r", "w")
+	vec := []float32{1, 2, 3, 4}
+	must(t, c.PutChunkVector(ctx, "ch", "r", "fp", vec, ""))      // empty first
+	must(t, c.PutChunkVector(ctx, "ch", "r", "fp", vec, "real"))  // backfill
+	must(t, c.PutChunkVector(ctx, "ch", "r", "fp", vec, "other")) // must NOT clobber
+	var content string
+	if err := c.db.QueryRowContext(ctx, `SELECT content FROM chunks WHERE chunk_id=?`, "ch").Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if content != "real" {
+		t.Fatalf("content should backfill from empty then stay stable, got %q", content)
+	}
+}
+
+func TestDeleteJobsForWorktree(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c, "r", "w")
+	seedGeneration(t, c, "r", 1, "fp")
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "b.go", DesiredHash: "h", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	must(t, c.DeleteJobsForWorktree(ctx, "w"))
+	if n, _ := c.WorktreePendingCount(ctx, "w"); n != 0 {
+		t.Fatalf("all jobs should be cleared, %d remain", n)
+	}
+}
+
 func TestWorktreeFreshnessReads(t *testing.T) {
 	ctx := context.Background()
 	c := newTestCatalog(t)

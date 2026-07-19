@@ -39,6 +39,18 @@ func (c *Catalog) DeadLetterJob(ctx context.Context, job core.Job, reason string
 	})
 }
 
+// DeleteJobsForWorktree removes all pending jobs for a worktree. A one-shot
+// index reconciles the full desired state fresh, so it clears any leftover jobs
+// (e.g. from an interrupted prior run whose desired state has since changed)
+// before re-reconciling, rather than processing a stale job under an out-of-date
+// desired identity. Not for a running daemon (which must not drop live work).
+func (c *Catalog) DeleteJobsForWorktree(ctx context.Context, wt core.WorktreeID) error {
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM index_jobs WHERE worktree_id=?`, string(wt))
+		return err
+	})
+}
+
 // RequeueClaimedJobs releases every claimed job so a restarted worker can
 // re-claim work a crashed worker left in flight (invariant 7 recovery).
 func (c *Catalog) RequeueClaimedJobs(ctx context.Context) (int, error) {

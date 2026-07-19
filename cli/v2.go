@@ -68,7 +68,7 @@ func openV2Runtime(ctx context.Context, root string, searchLimit int) (*runtime.
 
 func runV2Index(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	root, err := resolveV2Root(args)
+	root, err := v2ProjectRoot(args)
 	if err != nil {
 		return err
 	}
@@ -78,21 +78,22 @@ func runV2Index(cmd *cobra.Command, args []string) error {
 	}
 	defer eng.Close()
 
-	queued, dead, err := eng.Index(ctx)
+	queued, failed, err := eng.Index(ctx)
 	if err != nil {
 		return fmt.Errorf("index: %w", err)
 	}
-	if dead > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "indexed %d file(s) (%d dead-lettered)\n", queued, dead)
+	committed := queued - failed
+	if failed > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "indexed %d file(s), %d failed (dead-lettered)\n", committed, failed)
 	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "indexed %d file(s)\n", queued)
+		fmt.Fprintf(cmd.OutOrStdout(), "indexed %d file(s)\n", committed)
 	}
 	return nil
 }
 
 func runV2Search(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	root, err := os.Getwd()
+	root, err := v2ProjectRoot(nil)
 	if err != nil {
 		return err
 	}
@@ -116,9 +117,17 @@ func runV2Search(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func resolveV2Root(args []string) (string, error) {
+// v2ProjectRoot resolves a consistent repository root for both index and
+// search, so running them from different subdirectories agrees on the worktree.
+// An explicit dir argument wins; otherwise it walks up to the project root
+// (the directory holding .grepai), falling back to the current directory for a
+// first index before .grepai exists. runtime.Open resolves symlinks.
+func v2ProjectRoot(args []string) (string, error) {
 	if len(args) > 0 && args[0] != "" {
 		return filepath.Abs(args[0])
+	}
+	if root, err := config.FindProjectRoot(); err == nil {
+		return root, nil
 	}
 	return os.Getwd()
 }

@@ -72,9 +72,15 @@ func (c *Catalog) GetArtifact(ctx context.Context, key core.ArtifactKey) (core.A
 func (c *Catalog) PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error {
 	blob := encodeVector(vec)
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		// Content is content-addressed and stable per chunk_id, so the vector is
+		// never rewritten. But a chunk row created without content (e.g. an older
+		// schema, or a first writer that had none) is repaired here: a later
+		// writer's non-empty content backfills an empty one.
 		_, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO chunks(chunk_id, repository_id, fingerprint, dimensions, vector, content, created_at)
-			VALUES(?, ?, ?, ?, ?, ?, datetime('now'))`,
+			INSERT INTO chunks(chunk_id, repository_id, fingerprint, dimensions, vector, content, created_at)
+			VALUES(?, ?, ?, ?, ?, ?, datetime('now'))
+			ON CONFLICT(chunk_id) DO UPDATE SET content=excluded.content
+			WHERE chunks.content='' AND excluded.content<>''`,
 			chunkID, string(repo), fingerprint, len(vec), blob, content)
 		return err
 	})

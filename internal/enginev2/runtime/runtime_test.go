@@ -75,3 +75,28 @@ func TestRuntimeIndexAndSearch(t *testing.T) {
 		t.Fatalf("re-indexing an unchanged repo must be idle, queued=%d", queued2)
 	}
 }
+
+// Opening an existing index with a different fingerprint (config/model changed)
+// must fail explicitly rather than silently returning no results.
+func TestRuntimeFingerprintMismatchFails(t *testing.T) {
+	ctx := context.Background()
+	fx := enginetest.NewGitFixture(t)
+	fx.WriteFile("a.go", "package main\nfunc A() {}\n")
+	fx.Commit("init")
+	emb := enginetest.NewFakeEmbedder(4)
+	catPath := filepath.Join(t.TempDir(), "catalog_v2.db")
+
+	eng, err := runtime.Open(ctx, catPath, fx.Root(), emb, "fp-A", 512, 50, 20)
+	if err != nil {
+		t.Fatalf("open A: %v", err)
+	}
+	if _, _, err := eng.Index(ctx); err != nil {
+		t.Fatalf("index A: %v", err)
+	}
+	_ = eng.Close()
+
+	// Reopening the same catalog with a changed fingerprint must error.
+	if _, err := runtime.Open(ctx, catPath, fx.Root(), emb, "fp-B", 512, 50, 20); err == nil {
+		t.Fatal("opening an index with a changed fingerprint must fail")
+	}
+}
