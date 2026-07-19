@@ -165,6 +165,30 @@ func TestRegisterIdempotent(t *testing.T) {
 	}
 }
 
+// Register must recover a half-bootstrapped repository (a 'building' generation
+// 1 that was created but never activated) by activating it — proving the fix,
+// not just the already-active fast path (Codex Phase 5 re-review).
+func TestRegisterActivatesExistingBuildingGeneration(t *testing.T) {
+	ctx := context.Background()
+	c, _, s := newServer(t)
+	// Simulate a crash after CreateGeneration but before activation.
+	if err := c.RegisterRepository(ctx, "/repo/z", "/repo/z", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateGeneration(ctx, "/repo/z", 1, "fp"); err != nil { // 'building', not active
+		t.Fatal(err)
+	}
+	if active, _ := c.ActiveGeneration(ctx, "/repo/z"); active != 0 {
+		t.Fatalf("precondition: no active generation yet, got %d", active)
+	}
+	if _, err := s.Register(ctx, service.RegisterRequest{Root: "/repo/z"}); err != nil {
+		t.Fatal(err)
+	}
+	if active, _ := c.ActiveGeneration(ctx, "/repo/z"); active != 1 {
+		t.Fatalf("Register must activate the existing building generation 1, got %d", active)
+	}
+}
+
 func TestWaitFreshUnknownWorktreeErrors(t *testing.T) {
 	ctx := context.Background()
 	_, _, s := newServer(t)

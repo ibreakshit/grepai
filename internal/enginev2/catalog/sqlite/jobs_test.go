@@ -138,6 +138,10 @@ func TestCommitDeleteAtNonActiveGenerationKeepsView(t *testing.T) {
 	if id, ok, _ := c.ResolveView(ctx, "w", "a.go"); !ok || id != artA.ID {
 		t.Fatalf("active view must survive a non-active-generation delete: ok=%v id=%s", ok, id)
 	}
+	// The delete job itself must still have been consumed (its build/work is done).
+	if _, _, ok, _ := c.CurrentJob(ctx, "w", "a.go"); ok {
+		t.Fatal("the non-active delete job should have been removed")
+	}
 }
 
 func TestCommitDeleteSupersededKeepsNewerUpsert(t *testing.T) {

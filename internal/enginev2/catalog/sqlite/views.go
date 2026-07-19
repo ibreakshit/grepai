@@ -94,11 +94,14 @@ func commitTouchesActiveView(ctx context.Context, tx *sql.Tx, wt core.WorktreeID
 		SELECT g.generation FROM index_generations g
 		JOIN worktrees w ON w.repository_id = g.repository_id
 		WHERE w.worktree_id=? AND g.status='active'`, string(wt)).Scan(&active)
-	if errors.Is(err, sql.ErrNoRows) || !active.Valid {
-		return true, nil // no active generation yet: bootstrap commit switches
-	}
 	if err != nil {
-		return false, err
+		if errors.Is(err, sql.ErrNoRows) {
+			return true, nil // no active generation yet: bootstrap commit switches
+		}
+		return false, err // a real read error must not be treated as "no active gen"
+	}
+	if !active.Valid {
+		return true, nil
 	}
 	return active.Int64 == int64(gen), nil
 }
