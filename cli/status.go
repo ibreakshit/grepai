@@ -436,6 +436,11 @@ func (m model) viewTokenSavingsView() string {
 func runStatus(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
+	// engine:v2 routes to the daemon (v1 inert); loud on failure, no fallback.
+	if cfg, v2 := repoEngineV2(); v2 {
+		return runStatusDaemon(cmd, cfg)
+	}
+
 	// Find project root
 	projectRoot, err := config.FindProjectRoot()
 	if err != nil {

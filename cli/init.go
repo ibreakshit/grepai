@@ -19,6 +19,7 @@ var (
 	initNonInteractive bool
 	initInherit        bool
 	initUI             bool
+	initEngine         string
 )
 
 const (
@@ -45,6 +46,7 @@ func init() {
 	initCmd.Flags().BoolVar(&initNonInteractive, "yes", false, "Use defaults without prompting")
 	initCmd.Flags().BoolVar(&initInherit, "inherit", false, "Inherit configuration from main worktree (for git worktrees)")
 	initCmd.Flags().BoolVar(&initUI, "ui", false, "Run interactive Bubble Tea UI wizard")
+	initCmd.Flags().StringVar(&initEngine, "engine", "", "Indexing engine: v1 (default, per-repo) or v2 (grepaid daemon)")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -302,12 +304,33 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Opt this repo into the v2 daemon engine if requested.
+	if initEngine == "v2" {
+		cfg.Engine = "v2"
+	}
+
 	// Save configuration
 	if err := cfg.Save(cwd); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
 
 	fmt.Printf("\nCreated configuration at %s\n", config.GetConfigPath(cwd))
+
+	// Under engine:v2, best-effort register this repo with the daemon so it starts
+	// indexing. A failure here warns but does not fail init (the daemon may be
+	// configured/started later).
+	if cfg.EngineV2() {
+		if client, derr := ensureDaemonClient(cmd.Context(), cfg); derr != nil {
+			fmt.Printf("Warning: engine:v2 set but could not reach the grepaid daemon: %v\n", derr)
+		} else {
+			if _, rerr := registerCwd(cmd.Context(), client); rerr != nil {
+				fmt.Printf("Warning: registered engine:v2 but repo registration failed: %v\n", rerr)
+			} else {
+				fmt.Println("Registered with the grepaid daemon (engine:v2)")
+			}
+			_ = client.Close()
+		}
+	}
 
 	// Add .grepai/ to .gitignore
 	gitignorePath := cwd + "/.gitignore"
