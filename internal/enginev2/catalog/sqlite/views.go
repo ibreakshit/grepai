@@ -114,8 +114,8 @@ func (c *Catalog) ClaimNextJob(ctx context.Context, minPriority core.Priority) (
 			Path:        path,
 			DesiredHash: hash,
 			Generation:  core.Generation(gen),
-			Operation:   core.Operation(op),
-			Priority:    core.Priority(prio),
+			Operation:   core.Operation(op),  //nolint:gosec // #nosec G115 - operation is a small enum persisted by this package
+			Priority:    core.Priority(prio), //nolint:gosec // #nosec G115 - priority is a small enum persisted by this package
 			Attempts:    att,
 		}
 		found = true
