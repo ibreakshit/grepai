@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/yoanbernabeu/grepai/embedder"
 	"github.com/yoanbernabeu/grepai/indexer"
@@ -103,7 +104,11 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 		lg.Printf("chmod socket: %v", err)
 	}
 
-	go func() { _ = sch.Run(ctx) }()
+	// The scheduler runs under a derived context so a serve failure also stops it.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	schDone := make(chan struct{})
+	go func() { _ = sch.Run(runCtx); close(schDone) }()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- rpc.Serve(l, regsvc) }()
 	lg.Printf("listening on %s (%d repos registered)", p.Socket, len(reg.Entries))
@@ -117,9 +122,20 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 		}
 	}
 
-	// Graceful shutdown: stop accepting, let the scheduler drain via ctx, close
-	// catalogs, remove the socket. set.Close runs via defer.
+	// Graceful shutdown ordering: stop accepting connections, stop the scheduler
+	// and WAIT for its in-flight dispatch to drain (scheduler.Run blocks on its
+	// WaitGroup) BEFORE the deferred set.Close() closes the catalogs — otherwise
+	// an in-flight index commit could touch a closed catalog. Read-only query
+	// handlers on still-open connections may briefly see closed-catalog errors
+	// after this point; that is harmless (queries never mutate; index jobs are
+	// durable and requeued on next start).
 	_ = l.Close()
+	cancel()
+	select {
+	case <-schDone:
+	case <-time.After(10 * time.Second):
+		lg.Printf("scheduler did not drain within 10s; closing catalogs anyway")
+	}
 	_ = os.Remove(p.Socket)
 	lg.Printf("shutting down")
 	return retErr

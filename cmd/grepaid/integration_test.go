@@ -150,6 +150,100 @@ func TestDaemonRegisterReconcileSearchIsolation(t *testing.T) {
 	}
 }
 
+// TestFingerprintRolloverOnRestart indexes a repo under one embedder, then
+// restarts the daemon with a different embedder (different fingerprint) and
+// asserts the repo rolls to a fresh generation and re-indexes — never wedges.
+func TestFingerprintRolloverOnRestart(t *testing.T) {
+	p := setHostEnv(t)
+	fx := enginetest.NewGitFixture(t)
+	fx.WriteFile("f.txt", "some content to index")
+	fx.Commit("c")
+
+	// First run: index with a 4-dim embedder.
+	cfg1 := testConfig() // provider "synthetic", cosmetic
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() { done1 <- runWithEmbedder(ctx1, p, cfg1, enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	c1 := dialWithRetry(t, p.Socket, 3*time.Second)
+	reg, err := c1.Register(context.Background(), service.RegisterRequest{Root: fx.Root()})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, err := c1.Reconcile(context.Background(), service.ReconcileRequest{WorktreeID: reg.WorktreeID}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	waitFresh(t, c1, reg.WorktreeID, 5*time.Second)
+	st1, _ := c1.Status(context.Background(), service.StatusRequest{WorktreeID: reg.WorktreeID})
+	c1.Close()
+	cancel1()
+	<-done1
+
+	// Second run: a DIFFERENT chunking → different fingerprint. On rehydrate the
+	// repo's active generation fingerprint mismatches, so it must roll forward.
+	cfg2 := testConfig()
+	cfg2.Chunking = daemoncfg.ChunkingConfig{Size: 256, Overlap: 32} // changes the fingerprint
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() { done2 <- runWithEmbedder(ctx2, p, cfg2, enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	defer func() { cancel2(); <-done2 }()
+	c2 := dialWithRetry(t, p.Socket, 3*time.Second)
+	defer c2.Close()
+	st2, err := c2.Status(context.Background(), service.StatusRequest{WorktreeID: reg.WorktreeID})
+	if err != nil {
+		t.Fatalf("Status after restart: %v", err)
+	}
+	if st2.ActiveGeneration <= st1.ActiveGeneration {
+		t.Fatalf("expected generation to roll forward from %d, got %d", st1.ActiveGeneration, st2.ActiveGeneration)
+	}
+	// Reconcile + reindex under the new generation, then search works.
+	if _, err := c2.Reconcile(context.Background(), service.ReconcileRequest{WorktreeID: reg.WorktreeID}); err != nil {
+		t.Fatalf("Reconcile after roll: %v", err)
+	}
+	waitFresh(t, c2, reg.WorktreeID, 5*time.Second)
+	res, err := c2.Search(context.Background(), service.SearchRequest{WorktreeID: reg.WorktreeID, Query: "content"})
+	if err != nil {
+		t.Fatalf("Search after roll: %v", err)
+	}
+	if len(res.Results) == 0 {
+		t.Fatal("search returned nothing after fingerprint roll + reindex")
+	}
+}
+
+// TestCleanShutdownAfterReconcile cancels the daemon right after enqueuing work
+// and asserts run() returns cleanly (the scheduler drains before catalogs close).
+func TestCleanShutdownAfterReconcile(t *testing.T) {
+	p := setHostEnv(t)
+	fx := enginetest.NewGitFixture(t)
+	fx.WriteFile("f.txt", "content")
+	fx.Commit("c")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runWithEmbedder(ctx, p, testConfig(), enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	c := dialWithRetry(t, p.Socket, 3*time.Second)
+	reg, err := c.Register(context.Background(), service.RegisterRequest{Root: fx.Root()})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, err := c.Reconcile(context.Background(), service.ReconcileRequest{WorktreeID: reg.WorktreeID}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	c.Close()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned error on shutdown: %v", err)
+		}
+	case <-time.After(12 * time.Second):
+		t.Fatal("run did not return within 12s of cancel (shutdown hang)")
+	}
+	// Socket cleaned up.
+	if _, err := os.Stat(p.Socket); !os.IsNotExist(err) {
+		t.Fatalf("socket not removed on shutdown: %v", err)
+	}
+}
+
 func TestSingletonRejectsSecondDaemon(t *testing.T) {
 	p := setHostEnv(t)
 	l1, err := daemonctl.Acquire(p.Lock)
