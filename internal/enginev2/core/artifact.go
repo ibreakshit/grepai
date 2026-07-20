@@ -57,4 +57,27 @@ type CommitRequest struct {
 	// Chunks is the ordered chunk composition to persist atomically with the
 	// artifact and view switch (invariant 6). Ordinals must be 0..len-1.
 	Chunks []ArtifactChunk
+	// Symbols/SymbolEdges are artifact-scoped derived data (call-graph tracing),
+	// persisted atomically with the artifact. SymbolsExtracted marks whether
+	// extraction ran (a file with zero symbols is still "extracted" — the
+	// symbols_version marker keeps the backfill from rescanning it forever).
+	Symbols          []SymbolDef
+	SymbolEdges      []SymbolEdge
+	SymbolsExtracted bool
+}
+
+// SymbolDef is one extracted symbol definition (artifact-scoped).
+type SymbolDef struct {
+	Name      string
+	Kind      string
+	Line      int
+	EndLine   int
+	Signature string
+}
+
+// SymbolEdge is one caller->callee call edge with its call-site line.
+type SymbolEdge struct {
+	Caller string
+	Callee string
+	Line   int
 }
