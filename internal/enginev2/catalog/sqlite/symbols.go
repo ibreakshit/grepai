@@ -61,16 +61,23 @@ func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, nam
 // view. callersOf=true returns edges WHERE callee=name (who calls it);
 // callersOf=false returns edges WHERE caller=name (what it calls).
 func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error) {
-	where := "e.callee=?"
-	if !callersOf {
-		where = "e.caller=?"
-	}
-	rows, err := c.db.QueryContext(ctx, `
+	const byCallee = `
 		SELECT e.caller, e.callee, wf.relative_path, e.line
 		FROM worktree_files wf
 		JOIN symbol_edges e ON e.artifact_id = wf.artifact_id
-		WHERE wf.worktree_id=? AND `+where+`
-		ORDER BY wf.relative_path, e.line`, string(wt), name)
+		WHERE wf.worktree_id=? AND e.callee=?
+		ORDER BY wf.relative_path, e.line`
+	const byCaller = `
+		SELECT e.caller, e.callee, wf.relative_path, e.line
+		FROM worktree_files wf
+		JOIN symbol_edges e ON e.artifact_id = wf.artifact_id
+		WHERE wf.worktree_id=? AND e.caller=?
+		ORDER BY wf.relative_path, e.line`
+	query := byCallee
+	if !callersOf {
+		query = byCaller
+	}
+	rows, err := c.db.QueryContext(ctx, query, string(wt), name)
 	if err != nil {
 		return nil, err
 	}
