@@ -61,7 +61,7 @@ func warnIfV1WatcherRunning(cmd *cobra.Command) {
 
 // runSearchDaemon serves a top-level `grepai search` against the daemon (engine:v2).
 // It fails loudly on any daemon/embedder error — there is no silent v1 fallback.
-func runSearchDaemon(cmd *cobra.Command, args []string, cfg *config.Config) error {
+func runSearchDaemon(cmd *cobra.Command, args []string) error {
 	if searchWorkspace != "" || len(searchProjects) > 0 {
 		return fmt.Errorf("workspace/project search is not supported under engine: v2")
 	}
@@ -70,7 +70,7 @@ func runSearchDaemon(cmd *cobra.Command, args []string, cfg *config.Config) erro
 	}
 	warnIfV1WatcherRunning(cmd)
 	ctx := context.Background()
-	client, err := ensureDaemonClient(ctx, cfg)
+	client, err := ensureDaemonClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -134,10 +134,10 @@ func encodeJSON(cmd *cobra.Command, v any) error {
 }
 
 // runStatusDaemon serves a top-level `grepai status` against the daemon.
-func runStatusDaemon(cmd *cobra.Command, cfg *config.Config) error {
+func runStatusDaemon(cmd *cobra.Command) error {
 	warnIfV1WatcherRunning(cmd)
 	ctx := context.Background()
-	client, err := ensureDaemonClient(ctx, cfg)
+	client, err := ensureDaemonClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -162,14 +162,14 @@ func runStatusDaemon(cmd *cobra.Command, cfg *config.Config) error {
 // ensure-registers the repo, reconciles once, and tails freshness until the
 // index is fresh. Continuous file-event watching is daemon-managed and a later
 // slice; this is the reconcile-on-demand degradation.
-func runWatchDaemon(cmd *cobra.Command, cfg *config.Config) error {
+func runWatchDaemon(cmd *cobra.Command) error {
 	if watchBackground || watchStatus || watchStop {
 		return fmt.Errorf("under engine: v2 the daemon manages indexing; use `grepai daemon start|status|stop` instead of `grepai watch --background|--status|--stop`")
 	}
 	fmt.Fprintln(cmd.ErrOrStderr(), "note: engine:v2 — `grepai watch` now reconciles via the grepaid daemon (per-repo watchers are retired)")
 	warnIfV1WatcherRunning(cmd)
 	ctx := context.Background()
-	client, err := ensureDaemonClient(ctx, cfg)
+	client, err := ensureDaemonClient(ctx)
 	if err != nil {
 		return err
 	}

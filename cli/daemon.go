@@ -45,7 +45,7 @@ func init() {
 }
 
 func runDaemonStart(cmd *cobra.Command, _ []string) error {
-	client, err := ensureDaemonClient(cmd.Context(), nil)
+	client, err := ensureDaemonClient(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	socket, err := daemonSocket(nil)
+	socket, err := daemonSocket()
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func runDaemonStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	socket, err := daemonSocket(nil)
+	socket, err := daemonSocket()
 	if err != nil {
 		return err
 	}

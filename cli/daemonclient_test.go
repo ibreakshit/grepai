@@ -1,31 +1,35 @@
 package cli
 
 import (
+	"path/filepath"
 	"testing"
-
-	"github.com/yoanbernabeu/grepai/config"
 )
 
-func TestDaemonSocketHonorsOverride(t *testing.T) {
-	cfg := &config.Config{Daemon: config.DaemonConfig{Socket: "/tmp/custom.sock"}}
-	got, err := daemonSocket(cfg)
+func TestDaemonSocketPrecedence(t *testing.T) {
+	// GREPAID_SOCKET wins over everything.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("GREPAID_SOCKET", "/tmp/env.sock")
+	got, err := daemonSocket()
 	if err != nil {
 		t.Fatalf("daemonSocket: %v", err)
 	}
-	if got != "/tmp/custom.sock" {
-		t.Fatalf("override ignored: got %q", got)
+	if got != "/tmp/env.sock" {
+		t.Fatalf("env should win: got %q", got)
 	}
 }
 
 func TestDaemonSocketFallsBackToHostDefault(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", "/xdg/state")
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("GREPAID_SOCKET", "")
 	t.Setenv("XDG_RUNTIME_DIR", "")
-	got, err := daemonSocket(&config.Config{})
+	got, err := daemonSocket()
 	if err != nil {
 		t.Fatalf("daemonSocket: %v", err)
 	}
-	if got != "/xdg/state/grepai/grepaid.sock" {
-		t.Fatalf("host default wrong: got %q", got)
+	want := filepath.Join(state, "grepai", "grepaid.sock")
+	if got != want {
+		t.Fatalf("host default wrong: got %q want %q", got, want)
 	}
 }

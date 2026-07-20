@@ -75,17 +75,10 @@ type Config struct {
 	ExternalGitignore string          `yaml:"external_gitignore,omitempty"`
 	// Engine selects the indexing engine for this repo: "" or "v1" (default) is
 	// the classic per-repo engine; "v2" routes commands to the grepaid daemon and
-	// makes v1 inert for this repo.
-	Engine string       `yaml:"engine,omitempty"`
-	Daemon DaemonConfig `yaml:"daemon,omitempty"`
-}
-
-// DaemonConfig holds per-repo overrides for talking to the grepaid daemon.
-// Global daemon settings (embedder, scheduler) live in the host daemon.json, not
-// here.
-type DaemonConfig struct {
-	// Socket overrides the daemon Unix-socket path the CLI dials for this repo.
-	Socket string `yaml:"socket,omitempty"`
+	// makes v1 inert for this repo. The daemon and its socket are host-level
+	// (GREPAID_SOCKET / daemon.json) — a per-repo socket would be incoherent
+	// with the single host daemon and its singleton lock.
+	Engine string `yaml:"engine,omitempty"`
 }
 
 // EngineV2 reports whether this repo is configured to use the v2 daemon engine.

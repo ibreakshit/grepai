@@ -92,8 +92,14 @@ func StopDaemon(lockPath string, timeout time.Duration) error {
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if l, err := Acquire(lockPath); err == nil {
+		l, aerr := Acquire(lockPath)
+		if aerr == nil {
 			return l.Release()
+		}
+		if !errors.Is(aerr, ErrAlreadyRunning) {
+			// A permission/IO failure is not "still running" — surface it
+			// instead of spinning until the timeout lies about the outcome.
+			return aerr
 		}
 		if time.Now().After(deadline) {
 			return errors.New("grepaid: did not exit before timeout")

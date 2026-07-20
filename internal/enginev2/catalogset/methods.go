@@ -163,14 +163,15 @@ func (s *Set) CurrentJob(ctx context.Context, wt core.WorktreeID, relPath string
 	return c.CurrentJob(ctx, wt, relPath)
 }
 
-// ClearWorktreeState is beyond the strict interface union; the daemon's
-// fingerprint rollover uses it. Routed by worktree.
-func (s *Set) ClearWorktreeState(ctx context.Context, wt core.WorktreeID) error {
+// RollWorktreeGeneration is beyond the strict interface union; the daemon's
+// fingerprint rollover uses it (atomic clear-view+clear-jobs+activate). Routed
+// by worktree.
+func (s *Set) RollWorktreeGeneration(ctx context.Context, wt core.WorktreeID, repo core.RepositoryID, gen core.Generation) error {
 	c, err := s.getByWT(wt)
 	if err != nil {
 		return err
 	}
-	return c.ClearWorktreeState(ctx, wt)
+	return c.RollWorktreeGeneration(ctx, wt, repo, gen)
 }
 
 func (s *Set) WorktreeIndexedHashes(ctx context.Context, wt core.WorktreeID) (map[string]string, error) {

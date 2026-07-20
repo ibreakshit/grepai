@@ -19,9 +19,17 @@ import (
 // to mutate state after the caller has torn it down. Returns nil when stopped
 // by ctx/listener close.
 func Serve(ctx context.Context, l net.Listener, h service.Service) error {
-	var conns sync.Map // net.Conn -> struct{}
+	// sctx also cancels when Serve returns for any reason, so the watcher
+	// goroutine below never leaks even if the caller's ctx stays live.
+	sctx, scancel := context.WithCancel(ctx)
+	defer scancel()
+
+	var (
+		conns sync.Map // net.Conn -> struct{}
+		wg    sync.WaitGroup
+	)
 	go func() {
-		<-ctx.Done()
+		<-sctx.Done()
 		_ = l.Close()
 		conns.Range(func(k, _ any) bool {
 			if c, ok := k.(net.Conn); ok {
@@ -30,20 +38,39 @@ func Serve(ctx context.Context, l net.Listener, h service.Service) error {
 			return true
 		})
 	}()
+
+	var retErr error
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return nil
+			if !errors.Is(err, net.ErrClosed) {
+				retErr = err
 			}
-			return err
+			break
 		}
 		conns.Store(conn, struct{}{})
+		// Close the race where cancellation lands between Accept and Store:
+		// the sweep may already have run, so re-check and close ourselves.
+		if sctx.Err() != nil {
+			_ = conn.Close()
+			conns.Delete(conn)
+			continue
+		}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer conns.Delete(conn)
 			_ = handleConn(ctx, conn, h)
 		}()
 	}
+	// Wait for every handler before returning: the caller tears down shared
+	// state (catalogs) right after Serve/scheduler finish, so no handler —
+	// including a mutating Register/Reconcile — may still be running. The
+	// connections are closed by the sweep above, which unblocks their reads;
+	// in-flight service calls see the canceled ctx.
+	scancel()
+	wg.Wait()
+	return retErr
 }
 
 // handleConn reads framed requests sequentially and writes framed responses.

@@ -320,7 +320,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// indexing. A failure here warns but does not fail init (the daemon may be
 	// configured/started later).
 	if cfg.EngineV2() {
-		if client, derr := ensureDaemonClient(cmd.Context(), cfg); derr != nil {
+		if client, derr := ensureDaemonClient(cmd.Context()); derr != nil {
 			fmt.Printf("Warning: engine:v2 set but could not reach the grepaid daemon: %v\n", derr)
 		} else {
 			if _, rerr := registerCwd(cmd.Context(), client); rerr != nil {

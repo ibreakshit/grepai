@@ -86,26 +86,17 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 			continue
 		}
 		// A root whose .grepai directory is gone was deliberately uninitialized:
-		// skip it rather than recreating state the operator deleted. A missing
-		// CATALOG under an intact .grepai is a wiped index: rebuild it and force
-		// a reconcile (the registry entry predates it, so the first-registration
-		// auto-reconcile would not fire).
+		// skip it rather than recreating state the operator deleted. (This is a
+		// best-effort check — an operator deleting .grepai mid-startup races it,
+		// which is inherent to any filesystem check.) A missing CATALOG under an
+		// intact .grepai needs no special-casing: Register's empty-view
+		// predicate recreates and reconciles it.
 		if _, statErr := os.Stat(filepath.Join(e.Root, ".grepai")); statErr != nil {
 			lg.Printf("startup: skipping repo %s: .grepai removed (uninitialized); delete it from %s to silence", e.RepositoryID, p.Registry)
 			continue
 		}
-		_, catErr := os.Stat(e.CatalogPath)
-		wtresp, err := regsvc.Register(ctx, service.RegisterRequest{Root: e.Root})
-		if err != nil {
+		if _, err := regsvc.Register(ctx, service.RegisterRequest{Root: e.Root}); err != nil {
 			lg.Printf("startup: skipping repo %s: %v", e.RepositoryID, err)
-			continue
-		}
-		if catErr != nil { // catalog file was missing before Register recreated it
-			if rresp, rerr := regsvc.Reconcile(ctx, service.ReconcileRequest{WorktreeID: wtresp.WorktreeID}); rerr != nil {
-				lg.Printf("startup: repo %s catalog was rebuilt but reconcile failed: %v", e.RepositoryID, rerr)
-			} else {
-				lg.Printf("startup: repo %s catalog was missing; rebuilt and queued %d jobs", e.RepositoryID, rresp.JobsQueued)
-			}
 		}
 	}
 
@@ -216,23 +207,25 @@ type registryManager struct {
 	reg  *registry.Registry
 }
 
+// upsert stores the entry, carrying forward the existing reconcile cursor when
+// the caller passes zero values (a plain re-Register must not blank the cursor
+// touchReconcile maintains).
 func (m *registryManager) upsert(e registry.Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.reg.Upsert(e)
-	return m.reg.Save(m.path)
-}
-
-// has reports whether repoID is already registered.
-func (m *registryManager) has(repoID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, e := range m.reg.Entries {
-		if e.RepositoryID == repoID {
-			return true
+	for _, old := range m.reg.Entries {
+		if old.RepositoryID == e.RepositoryID {
+			if e.LastReconciledAt == "" {
+				e.LastReconciledAt = old.LastReconciledAt
+			}
+			if e.PendingCount == 0 {
+				e.PendingCount = old.PendingCount
+			}
+			break
 		}
 	}
-	return false
+	m.reg.Upsert(e)
+	return m.reg.Save(m.path)
 }
 
 // touchReconcile refreshes a repo's registry cursor after a reconcile. The
@@ -294,14 +287,37 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 	}
 	s.br.Add(repo, artifacts.New(indexer.NewChunker(s.size, s.overlap), s.emb, cache))
 
-	firstRegistration := !s.reg.has(string(repo))
-
 	resp, err := s.Server.Register(ctx, service.RegisterRequest{Root: canonical})
 	if err != nil {
 		return resp, err
 	}
 	if err := s.rollIfMismatch(ctx, repo, resp.WorktreeID); err != nil {
 		return resp, err
+	}
+
+	// Unified needs-reconcile predicate: an empty view with nothing pending
+	// means this worktree is unindexed — whether because it is brand new, a
+	// fingerprint roll just cleared it, a prior initial reconcile failed and is
+	// being retried, or the catalog file was recreated after deletion. This is a
+	// durable state check, not a fragile registered-before flag, so every one of
+	// those paths converges on "reconcile now, loudly". (Invariant 3 intact:
+	// Register is a mutation path; queries still never enqueue.)
+	indexed, err := s.set.WorktreeIndexedHashes(ctx, resp.WorktreeID)
+	if err != nil {
+		return resp, err
+	}
+	pending, err := s.set.WorktreePendingCount(ctx, resp.WorktreeID)
+	if err != nil {
+		return resp, err
+	}
+	if len(indexed) == 0 && pending == 0 {
+		rresp, rerr := s.Reconcile(ctx, service.ReconcileRequest{WorktreeID: resp.WorktreeID})
+		if rerr != nil {
+			// Fail Register loudly BEFORE the registry upsert: a retry sees the
+			// same empty-view state and reconciles again — no false fresh-empty.
+			return resp, fmt.Errorf("registered %s but its initial reconcile failed: %w", repo, rerr)
+		}
+		s.lg.Printf("registered %s: initial reconcile queued %d jobs", repo, rresp.JobsQueued)
 	}
 
 	active, err := s.set.ActiveGeneration(ctx, repo)
@@ -315,22 +331,6 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 		ActiveGeneration: int64(active),
 	}); err != nil {
 		s.lg.Printf("registry update for %s failed: %v", repo, err)
-	}
-
-	// A brand-new registration kicks off its initial reconcile so `init` and a
-	// first `search` actually start indexing (otherwise an empty catalog reports
-	// fresh with zero results). It goes through the Reconcile WRAPPER (registry
-	// cursor updated) and a failure fails the Register LOUDLY — succeeding
-	// while silently unindexed would recreate the false "fresh and empty" state.
-	// Register is idempotent, so the client simply retries after fixing the
-	// cause. (Invariant 3 intact: Register is a mutation path, queries still
-	// never enqueue.)
-	if firstRegistration {
-		rresp, rerr := s.Reconcile(ctx, service.ReconcileRequest{WorktreeID: resp.WorktreeID})
-		if rerr != nil {
-			return resp, fmt.Errorf("registered %s but its initial reconcile failed: %w", repo, rerr)
-		}
-		s.lg.Printf("registered %s: initial reconcile queued %d jobs", repo, rresp.JobsQueued)
 	}
 	return resp, nil
 }
@@ -377,17 +377,14 @@ func (s *registeringService) rollIfMismatch(ctx context.Context, repo core.Repos
 		}
 		next++ // occupied by another fingerprint: keep scanning
 	}
-	// CLEAR BEFORE ACTIVATE — the crash-safety hinge. Activation is the commit
-	// point of the roll: if we crashed after activating but before clearing, a
-	// restart would see activeFP == daemonFP, return early, and permanently
-	// serve the stale view. With clear-first, a crash at ANY point leaves the
-	// old generation active (fingerprint still mismatched), so the next restart
-	// simply re-runs the roll: re-clearing an already-empty view is idempotent,
-	// and the generation scan reuses the half-created generation.
-	if err := s.set.ClearWorktreeState(ctx, wt); err != nil {
-		return err
-	}
-	if err := s.set.SetActiveGeneration(ctx, repo, next); err != nil {
+	// The clear (view + jobs) and the activation are ONE transaction
+	// (RollWorktreeGeneration): a crash before it leaves the mismatch detectable
+	// (restart re-rolls; the generation scan reuses the half-created
+	// generation), and single-writer serialization means a concurrent worker
+	// commit lands either before the roll (its rows are cleared) or after (the
+	// invariant-12 guard rejects its now-retired generation) — no interleaving
+	// can strand stale view rows behind a matching fingerprint.
+	if err := s.set.RollWorktreeGeneration(ctx, wt, repo, next); err != nil {
 		return err
 	}
 	s.lg.Printf("repo %s fingerprint mismatch (%s != daemon %s); cleared the view and rolled to generation %d for reindex", repo, activeFP, s.fp, next)

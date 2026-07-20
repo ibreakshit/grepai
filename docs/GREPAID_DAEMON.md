@@ -32,11 +32,12 @@ Resolved from XDG conventions (Linux):
 | Log | `<state>/logs/grepaid.log` |
 | Per-repo index | `<repo>/.grepai/catalog_v2.db` |
 
-Override the socket with `GREPAID_SOCKET`, per-repo via `daemon.socket` in the
-repo's `.grepai/config.yaml`, or host-wide via `socket` in `daemon.json`
-(precedence: per-repo config > `GREPAID_SOCKET` > `daemon.json` > XDG default;
-a client-side socket is passed through to a lazily-spawned daemon so both ends
-always agree).
+The socket is **host-scoped** (there is one daemon per host, held by one
+singleton lock, so a per-repo socket could never reach a daemon of its own).
+Override it with `GREPAID_SOCKET` or via `socket` in `daemon.json`; precedence
+is `GREPAID_SOCKET` > `daemon.json` > XDG default, applied identically by the
+CLI and the daemon, and a lazily-spawned daemon receives the client's resolved
+socket via `GREPAID_SOCKET` — both ends always agree.
 
 ## `daemon.json` (host-global settings)
 
@@ -135,7 +136,10 @@ v1 inert.
   repos keep indexing; it is not yet fully evicted from the live set (open-time
   rejection of a corrupt/too-new catalog is in place).
 - **Dead-letter accounting in `grepai watch` is host-wide**, so a concurrent
-  failure in another repo can be attributed to the watched repo's summary line.
+  failure in another repo can be attributed to the watched repo's summary line,
+  and on a repo's very first registration a failure during the automatic
+  initial reconcile can land before the baseline and go unreported by that
+  `watch` run (it still appears in `grepai status` and the daemon log).
   `watch` always exits 0 once the index is fresh; failed files are reported as a
   warning, not an exit code.
 - **Trace/symbols, RPG refresh, and generation-scoped controlled rebuild** are

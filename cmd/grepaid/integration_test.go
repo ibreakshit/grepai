@@ -200,22 +200,19 @@ func TestFingerprintRolloverOnRestart(t *testing.T) {
 	if st2.ActiveGeneration <= st1.ActiveGeneration {
 		t.Fatalf("expected generation to roll forward from %d, got %d", st1.ActiveGeneration, st2.ActiveGeneration)
 	}
-	// The roll must have cleared the view: reconcile re-desires EVERY file (a
-	// naive roll would queue zero because the old hashes still look indexed).
-	rec, err := c2.Reconcile(context.Background(), service.ReconcileRequest{WorktreeID: reg.WorktreeID})
-	if err != nil {
-		t.Fatalf("Reconcile after roll: %v", err)
-	}
-	if rec.JobsQueued == 0 {
-		t.Fatal("rollover did not force a reindex: reconcile after fingerprint roll queued 0 jobs")
-	}
+	// The roll cleared the view, and Register's empty-view predicate already
+	// kicked off the reindex during rehydrate (no manual reconcile needed).
+	// Wait for it, then prove the view was genuinely REBUILT under the new
+	// embedder: an 8-dim query only hits 8-dim vectors — had the naive roll left
+	// the old 4-dim view in place, reconcile would have queued nothing and this
+	// search would come back empty on a "fresh" index.
 	waitFresh(t, c2, reg.WorktreeID, 5*time.Second)
 	res, err := c2.Search(context.Background(), service.SearchRequest{WorktreeID: reg.WorktreeID, Query: "content"})
 	if err != nil {
 		t.Fatalf("Search after roll: %v", err)
 	}
 	if len(res.Results) == 0 {
-		t.Fatal("search returned nothing after fingerprint roll + reindex (8-dim query against a properly reindexed view must hit)")
+		t.Fatal("rollover did not force a reindex: 8-dim search returned nothing on a fresh index (stale or empty view)")
 	}
 }
 

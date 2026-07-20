@@ -64,6 +64,14 @@ func (s *Set) reportErr(repo core.RepositoryID, err error) {
 // the schema guard: a catalog stamped newer than sqlite.LatestSchemaVersion is
 // closed and rejected with ErrSchemaTooNew (the daemon skips + logs it).
 func (s *Set) Add(ctx context.Context, repo core.RepositoryID, catalogPath string) error {
+	// Check closed BEFORE opening: a straggler Register during shutdown must not
+	// create/open filesystem state that nothing will ever close.
+	s.mu.RLock()
+	closed := s.closed
+	s.mu.RUnlock()
+	if closed {
+		return errors.New("catalogset: closed")
+	}
 	cat, err := sqlite.Open(ctx, catalogPath)
 	if err != nil {
 		return err
