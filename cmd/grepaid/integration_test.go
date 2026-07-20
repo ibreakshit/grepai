@@ -318,3 +318,76 @@ func TestLazyStartSpawnsAndRespawns(t *testing.T) {
 		t.Fatalf("final StopDaemon: %v", err)
 	}
 }
+
+// TestWatcherAutoFreshness is the watcher's end-to-end proof: with the daemon
+// running, editing a file makes the index stale and then fresh again — and the
+// new content becomes searchable — WITHOUT any reconcile command being issued.
+func TestWatcherAutoFreshness(t *testing.T) {
+	p := setHostEnv(t)
+	fx := enginetest.NewGitFixture(t)
+	fx.WriteFile("main.go", "package main // alpha seed content")
+	fx.Commit("seed")
+
+	cfg := testConfig()
+	cfg.Watch.QuietMS = 100 // fast debounce for the test
+	cfg.Watch.MaxLatencyMS = 1000
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runWithEmbedder(ctx, p, cfg, enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("daemon did not shut down")
+		}
+	}()
+
+	c := dialWithRetry(t, p.Socket, 3*time.Second)
+	defer c.Close()
+	reg, err := c.Register(context.Background(), service.RegisterRequest{Root: fx.Root()})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	waitFresh(t, c, reg.WorktreeID, 5*time.Second)
+
+	// THE EDIT: write a brand-new file. No Reconcile/watch command follows.
+	newPath := filepath.Join(fx.Root(), "zeta_widget.go")
+	if err := os.WriteFile(newPath, []byte("package main // zeta widget marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The watcher must notice, reconcile, and index it on its own.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res, serr := c.Search(context.Background(), service.SearchRequest{WorktreeID: reg.WorktreeID, Query: "zeta widget"})
+		if serr == nil {
+			found := false
+			for _, h := range res.Results {
+				if h.Path == "zeta_widget.go" {
+					found = true
+					break
+				}
+			}
+			if found && res.Fresh {
+				break // auto-indexed, no command issued
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("edited file never became searchable without a reconcile command")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Negative control: catalog WAL churn (constant during the test) must not
+	// have wedged the repo in a dirty loop — it settles fresh and stays fresh.
+	time.Sleep(500 * time.Millisecond)
+	st, err := c.Status(context.Background(), service.StatusRequest{WorktreeID: reg.WorktreeID})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !st.Fresh {
+		t.Fatalf("repo did not settle fresh after watcher indexing (pending=%d) — possible self-trigger loop", st.Pending)
+	}
+}

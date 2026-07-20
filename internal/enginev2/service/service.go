@@ -20,9 +20,12 @@ type RegisterResponse struct {
 	WorktreeID   core.WorktreeID
 }
 
-// ReconcileRequest requests reconciliation of one worktree.
+// ReconcileRequest requests reconciliation of one worktree. Live marks the
+// resulting jobs as live-change priority (watcher-triggered edits index ahead
+// of background backfills).
 type ReconcileRequest struct {
 	WorktreeID core.WorktreeID
+	Live       bool
 }
 
 // ReconcileResponse reports how many jobs reconciliation produced.

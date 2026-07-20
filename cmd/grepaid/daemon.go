@@ -24,6 +24,7 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/runtime"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/scheduler"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/watch"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/worker"
 )
 
@@ -72,6 +73,23 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 		lg:      lg,
 		size:    size,
 		overlap: overlap,
+	}
+
+	// Continuous watcher: filesystem hints trigger live-priority reconciles.
+	// Constructed before rehydrate so the onRegistered hook covers every repo;
+	// its Close is deferred AFTER set.Close's defer (LIFO), so watcher loops —
+	// and any reconcile they are running — finish before catalogs close.
+	if cfg.WatchEnabled() {
+		wm := watch.New(watchConfig(cfg), scheduler.SystemClock{}, func(wctx context.Context, wt core.WorktreeID) error {
+			_, rerr := regsvc.Reconcile(wctx, service.ReconcileRequest{WorktreeID: wt, Live: true})
+			return rerr
+		}, watch.NewFSBackend, lg)
+		defer wm.Close()
+		regsvc.onRegistered = func(root string, wt core.WorktreeID) {
+			if werr := wm.Watch(root, wt); werr != nil {
+				lg.Printf("watch: could not start for %s: %v", wt, werr)
+			}
+		}
 	}
 
 	// Rehydrate every known repo through the same register path (opens the
@@ -250,15 +268,16 @@ func (m *registryManager) touchReconcile(repoID string, pending int, at time.Tim
 // embedded Server's. Register is serialized (set.Add + builder + registry).
 type registeringService struct {
 	*service.Server
-	mu      sync.Mutex
-	set     *catalogset.Set
-	br      *catalogset.BuilderRouter
-	emb     v2embedder.Embedder
-	fp      string
-	reg     *registryManager
-	lg      *log.Logger
-	size    int
-	overlap int
+	mu           sync.Mutex
+	onRegistered func(root string, wt core.WorktreeID) // optional: watcher hookup
+	set          *catalogset.Set
+	br           *catalogset.BuilderRouter
+	emb          v2embedder.Embedder
+	fp           string
+	reg          *registryManager
+	lg           *log.Logger
+	size         int
+	overlap      int
 }
 
 func (s *registeringService) Register(ctx context.Context, req service.RegisterRequest) (service.RegisterResponse, error) {
@@ -336,6 +355,9 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 	// existed (touchReconcile was a no-op then) — stamp the cursor now.
 	if reconciled >= 0 {
 		s.reg.touchReconcile(string(repo), reconciled, time.Now())
+	}
+	if s.onRegistered != nil {
+		s.onRegistered(canonical, resp.WorktreeID)
 	}
 	return resp, nil
 }
@@ -421,4 +443,23 @@ func canonicalizeRoot(root string) string {
 		return resolved
 	}
 	return abs
+}
+
+// watchConfig maps the daemon.json watch block onto the watch package config.
+func watchConfig(cfg *daemoncfg.Config) watch.Config {
+	w := cfg.Watch
+	out := watch.Config{}
+	if w.QuietMS > 0 {
+		out.Quiet = time.Duration(w.QuietMS) * time.Millisecond
+	}
+	if w.MaxLatencyMS > 0 {
+		out.MaxLatency = time.Duration(w.MaxLatencyMS) * time.Millisecond
+	}
+	if w.PollMinutes > 0 {
+		out.PollInterval = time.Duration(w.PollMinutes) * time.Minute
+	}
+	if w.SafetyNetMinutes > 0 {
+		out.SafetyNet = time.Duration(w.SafetyNetMinutes) * time.Minute
+	}
+	return out
 }

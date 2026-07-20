@@ -96,6 +96,14 @@ func (s *Server) Reconcile(ctx context.Context, req ReconcileRequest) (Reconcile
 	if err != nil {
 		return ReconcileResponse{}, err
 	}
+	if req.Live {
+		// Watcher-triggered: the file someone just saved indexes ahead of any
+		// bootstrap backfill. UpsertJob's conflict-update carries priority, so a
+		// live re-save of an already-queued file upgrades it.
+		for i := range plan.Jobs {
+			plan.Jobs[i].Priority = core.PriorityLiveChange
+		}
+	}
 	if err := s.cat.UpsertJobs(ctx, plan.Jobs); err != nil {
 		return ReconcileResponse{}, err
 	}
