@@ -198,3 +198,29 @@ func TestWatchIdempotentAndCloseWaits(t *testing.T) {
 	}
 	h.m.Close() // must not deadlock or panic; Cleanup will Close again (idempotent)
 }
+
+func TestCloseWaitsForInFlightReconcile(t *testing.T) {
+	h := newHarness(t, testCfg())
+	h.blockMu.Lock()
+	h.blockCh = make(chan struct{})
+	h.blockMu.Unlock()
+	h.backend.hints <- struct{}{}
+	h.advanceUntil(t, time.Second, func() bool { return h.m.running(core.WorktreeID("/repo")) })
+
+	closed := make(chan struct{})
+	go func() { h.m.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a reconcile was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+	h.blockMu.Lock()
+	close(h.blockCh)
+	h.blockCh = nil
+	h.blockMu.Unlock()
+	select {
+	case <-closed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the reconcile finished")
+	}
+}

@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -186,3 +187,21 @@ func TestFSBackendRootGone(t *testing.T) {
 		}
 	}
 }
+
+func TestFSBackendStartOnMissingRootIsRootGone(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "never-existed")
+	b, err := NewFSBackend(missing)
+	if err != nil {
+		// Constructing may legitimately fail instead; either surface is fine as
+		// long as it is loud. But if construction succeeded, Start MUST report
+		// ErrRootGone — a silent zero-watch backend retries a vanished repo
+		// forever.
+		t.Skipf("construction failed loudly instead: %v", err)
+	}
+	defer b.Close()
+	if serr := b.Start(); !errorsIs(serr, ErrRootGone) {
+		t.Fatalf("Start on missing root = %v; want ErrRootGone", serr)
+	}
+}
+
+func errorsIs(err, target error) bool { return errors.Is(err, target) }

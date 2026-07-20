@@ -250,10 +250,15 @@ func (m *Manager) loop(st *wtWatch, wt core.WorktreeID, pollMode bool) {
 			}
 			switch {
 			case errors.Is(err, ErrOverflow):
-				// Hints were lost; a reconcile re-derives everything anyway.
+				// Hints were lost; a reconcile re-derives everything anyway. Arm
+				// max-latency too: an overflow STORM keeps resetting the quiet
+				// window exactly like a hint storm and must be bounded the same way.
 				m.lg.Printf("watch: %s: %v; scheduling reconcile", wt, err)
 				dirty = true
 				quiet = m.clock.After(m.cfg.Quiet)
+				if maxLt == nil {
+					maxLt = m.clock.After(m.cfg.MaxLatency)
+				}
 			case errors.Is(err, ErrExhausted):
 				m.lg.Printf("watch: %s: %v; degrading to %s polling", wt, err, m.cfg.PollInterval)
 				if st.backend != nil {

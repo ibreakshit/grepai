@@ -87,6 +87,13 @@ func hardSkip(rel string) bool {
 func (b *fsBackend) addTree(dir string) error {
 	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			// The ROOT itself failing to stat is not a best-effort case: it means
+			// the worktree is gone and the manager must deregister it — otherwise
+			// Start would succeed with ZERO watches and the safety-net reconcile
+			// would retry a vanished repo forever.
+			if path == b.root {
+				return fmt.Errorf("%w: %v", ErrRootGone, err)
+			}
 			return nil // unreadable subtree: skip, reconcile still covers it
 		}
 		if !info.IsDir() {
