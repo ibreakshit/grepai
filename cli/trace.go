@@ -167,7 +167,7 @@ func runTraceCallers(cmd *cobra.Command, args []string) error {
 	if _, v2, gerr := repoEngineV2(); gerr != nil {
 		return gerr
 	} else if v2 {
-		return runTraceDaemon(cmd, symbolName, service.TraceCallers, traceDepth, traceJSON)
+		return runTraceDaemon(cmd, symbolName, service.TraceCallers, traceDepth)
 	}
 
 	if traceProject != "" && traceWorkspace == "" {
@@ -337,7 +337,7 @@ func runTraceCallees(cmd *cobra.Command, args []string) error {
 	if _, v2, gerr := repoEngineV2(); gerr != nil {
 		return gerr
 	} else if v2 {
-		return runTraceDaemon(cmd, symbolName, service.TraceCallees, traceDepth, traceJSON)
+		return runTraceDaemon(cmd, symbolName, service.TraceCallees, traceDepth)
 	}
 
 	if traceProject != "" && traceWorkspace == "" {
@@ -494,7 +494,7 @@ func runTraceGraph(cmd *cobra.Command, args []string) error {
 	if _, v2, gerr := repoEngineV2(); gerr != nil {
 		return gerr
 	} else if v2 {
-		return runTraceDaemon(cmd, symbolName, service.TraceGraph, traceDepth, traceJSON)
+		return runTraceDaemon(cmd, symbolName, service.TraceGraph, traceDepth)
 	}
 
 	if traceProject != "" && traceWorkspace == "" {

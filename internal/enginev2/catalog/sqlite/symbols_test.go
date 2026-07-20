@@ -186,3 +186,36 @@ func TestPutArtifactSymbolsReplaces(t *testing.T) {
 		t.Fatalf("stale edge survived replace: %+v", edges)
 	}
 }
+
+// TestV1ParityFieldsRoundTrip guards migration 0004: the extractor detail
+// fields (receiver/package/exported/language/docstring, edge context) must
+// survive commit → view read intact.
+func TestV1ParityFieldsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	c := openTestCatalog(t)
+	seedSymbolWorld(t, c, "r", "w", "a.go",
+		[]core.SymbolDef{{
+			Name: "Get", Kind: "method", Line: 10, EndLine: 20,
+			Signature: "func (s *Store) Get(k string) (string, error)",
+			Receiver:  "*Store", Package: "store", Exported: true,
+			Language: "go", Docstring: "Get returns the value for k.",
+		}},
+		[]core.SymbolEdge{{Caller: "Get", Callee: "lookup", Line: 12, Context: "\tv, err := lookup(k)"}}, true)
+
+	defs, err := c.SymbolDefinitions(ctx, "w", "Get")
+	if err != nil || len(defs) != 1 {
+		t.Fatalf("defs: %+v err=%v", defs, err)
+	}
+	d := defs[0]
+	if d.Receiver != "*Store" || d.Package != "store" || !d.Exported || d.Language != "go" ||
+		d.Docstring != "Get returns the value for k." {
+		t.Fatalf("v1-parity symbol fields lost: %+v", d)
+	}
+	edges, err := c.SymbolEdges(ctx, "w", "lookup", true)
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("edges: %+v err=%v", edges, err)
+	}
+	if edges[0].Context != "\tv, err := lookup(k)" {
+		t.Fatalf("edge context lost: %+v", edges[0])
+	}
+}

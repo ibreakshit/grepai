@@ -39,12 +39,20 @@ func (e *Extractor) Extract(ctx context.Context, relPath, content string) ([]cor
 	for _, s := range syms {
 		defs = append(defs, core.SymbolDef{
 			Name: s.Name, Kind: string(s.Kind), Line: s.Line, EndLine: s.EndLine, Signature: s.Signature,
+			Receiver: s.Receiver, Package: s.Package, Exported: s.Exported,
+			Language: s.Language, Docstring: s.Docstring,
 		})
 	}
 	// Only call references become edges; read/write refs are out of scope for
-	// the v2 model (issue #9 non-goal — grepai refs stays v1).
+	// the v2 model (issue #9 non-goal — grepai refs stays v1). Dedup keys on
+	// (caller, callee, line) — context is derived from the line, so it cannot
+	// differ within one key.
 	var edges []core.SymbolEdge
-	seen := map[core.SymbolEdge]bool{}
+	type edgeKey struct {
+		caller, callee string
+		line           int
+	}
+	seen := map[edgeKey]bool{}
 	for _, r := range refs {
 		if r.Kind != "" && r.Kind != trace.RefKindCall {
 			continue
@@ -52,10 +60,10 @@ func (e *Extractor) Extract(ctx context.Context, relPath, content string) ([]cor
 		if r.CallerName == "" || r.SymbolName == "" {
 			continue
 		}
-		ed := core.SymbolEdge{Caller: r.CallerName, Callee: r.SymbolName, Line: r.Line}
-		if !seen[ed] {
-			seen[ed] = true
-			edges = append(edges, ed)
+		k := edgeKey{r.CallerName, r.SymbolName, r.Line}
+		if !seen[k] {
+			seen[k] = true
+			edges = append(edges, core.SymbolEdge{Caller: r.CallerName, Callee: r.SymbolName, Line: r.Line, Context: r.Context})
 		}
 	}
 	return defs, edges, nil

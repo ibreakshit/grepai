@@ -73,13 +73,19 @@ type SymbolDef struct {
 	Line      int
 	EndLine   int
 	Signature string
+	Receiver  string
+	Package   string
+	Exported  bool
+	Language  string
+	Docstring string
 }
 
 // SymbolEdge is one caller->callee call edge with its call-site line.
 type SymbolEdge struct {
-	Caller string
-	Callee string
-	Line   int
+	Caller  string
+	Callee  string
+	Line    int
+	Context string // call-site source line (v1 CallSite.Context parity)
 }
 
 // SymbolAt is one symbol definition resolved through a worktree's active view.
@@ -90,14 +96,20 @@ type SymbolAt struct {
 	Line      int
 	EndLine   int
 	Signature string
+	Receiver  string
+	Package   string
+	Exported  bool
+	Language  string
+	Docstring string
 }
 
 // EdgeAt is one call edge resolved through a worktree's active view.
 type EdgeAt struct {
-	Caller string
-	Callee string
-	Path   string
-	Line   int
+	Caller  string
+	Callee  string
+	Path    string
+	Line    int
+	Context string
 }
 
 // MissingSymbolArtifact identifies one active-view file whose artifact has not

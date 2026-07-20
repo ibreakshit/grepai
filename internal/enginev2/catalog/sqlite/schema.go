@@ -8,7 +8,7 @@ import (
 
 // schemaVersion is the current catalog schema version. Bump it and append a
 // migration when the schema changes.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // LatestSchemaVersion is the schema version this binary migrates a catalog to.
 // The daemon refuses to open a catalog stamped newer than this.
@@ -157,12 +157,27 @@ CREATE INDEX idx_symbol_edges_caller ON symbol_edges(caller);
 CREATE INDEX idx_symbol_edges_callee ON symbol_edges(callee);
 `
 
-var migrations = []string{migration0001, migration0002, migration0003}
+// migration0004 (issue #20, v1-parity trace output) widens the symbol tables
+// with the fields the shared v1 extractor already produces: symbol identity
+// detail (receiver/package/exported/language/docstring) and the call-site
+// source line (context). Primary keys are unchanged (v3 keys already include
+// line). SymbolsVersionCurrent bumps to 2 alongside this, so the daemon
+// backfill re-extracts every artifact and populates the new columns.
+const migration0004 = `
+ALTER TABLE symbols ADD COLUMN receiver TEXT NOT NULL DEFAULT '';
+ALTER TABLE symbols ADD COLUMN package TEXT NOT NULL DEFAULT '';
+ALTER TABLE symbols ADD COLUMN exported INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE symbols ADD COLUMN language TEXT NOT NULL DEFAULT '';
+ALTER TABLE symbols ADD COLUMN docstring TEXT NOT NULL DEFAULT '';
+ALTER TABLE symbol_edges ADD COLUMN context TEXT NOT NULL DEFAULT '';
+`
+
+var migrations = []string{migration0001, migration0002, migration0003, migration0004}
 
 // SymbolsVersionCurrent is the extractor version stamped on artifacts whose
 // symbols have been extracted. Bump to force a fleet-wide re-backfill after an
 // extractor upgrade.
-const SymbolsVersionCurrent = 1
+const SymbolsVersionCurrent = 2
 
 // SchemaVersion returns the highest applied migration version (0 on a fresh DB).
 // Exported so the daemon can guard against opening a catalog written by a newer

@@ -292,6 +292,30 @@ func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, er
 		return TraceResponse{}, fmt.Errorf("trace: unknown direction %q", dir)
 	}
 
+	// Resolve definitions for every distinct edge endpoint (v1-parity: the CLI
+	// mirrors v1's caller/callee symbol resolution and graph node table from
+	// these). Bounded by the edge caps above; the root's defs are already in
+	// Definitions and are not duplicated here.
+	if len(resp.Edges) > 0 {
+		related := map[string][]core.SymbolAt{}
+		for _, e := range resp.Edges {
+			for _, n := range []string{e.Caller, e.Callee} {
+				if n == req.Symbol {
+					continue
+				}
+				if _, done := related[n]; done {
+					continue
+				}
+				nd, derr := s.cat.SymbolDefinitions(ctx, req.WorktreeID, n)
+				if derr != nil {
+					return TraceResponse{}, derr
+				}
+				related[n] = nd
+			}
+		}
+		resp.Related = related
+	}
+
 	if missing, err := s.cat.ArtifactsMissingSymbols(ctx, req.WorktreeID); err == nil {
 		resp.BackfillPending = len(missing)
 	}

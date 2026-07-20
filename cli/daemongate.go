@@ -14,6 +14,8 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
 	"github.com/yoanbernabeu/grepai/search"
+	gstats "github.com/yoanbernabeu/grepai/stats"
+	"github.com/yoanbernabeu/grepai/trace"
 )
 
 // repoEngineV2 loads the current repo's config and reports whether it is
@@ -223,15 +225,15 @@ func runWatchDaemon(cmd *cobra.Command) error {
 }
 
 // runTraceDaemon serves a top-level `grepai trace <dir> <symbol>` against the
-// daemon (engine:v2). Loud failures, no v1 fallback.
-func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int, asJSON bool) error {
+// daemon (engine:v2) and renders through the v1 output layer (JSON/TOON/UI/
+// text are v1's own code paths over a genuine trace.TraceResult — issue #20
+// parity). Loud failures, no v1 fallback. Not replicated from v1 (documented):
+// RPG feature_path enrichment and v1's graph-traversal heuristics.
+func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int) error {
 	// v1-only options fail loudly instead of being silently ignored (e.g.
 	// --workspace would otherwise misleadingly query only the current repo).
 	if traceWorkspace != "" || traceProject != "" {
 		return fmt.Errorf("--workspace/--project trace is not supported under engine: v2")
-	}
-	if traceTOON || traceUI {
-		return fmt.Errorf("--toon/--ui trace output is not supported under engine: v2 (use --json)")
 	}
 	if traceMode != "" && traceMode != "fast" {
 		return fmt.Errorf("--mode %s is not supported under engine: v2 (extraction mode is a daemon build-time property)", traceMode)
@@ -257,23 +259,109 @@ func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int, asJ
 	if resp.BackfillPending > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "note: symbol coverage still building (%d files pending backfill) — results may be incomplete\n", resp.BackfillPending)
 	}
-	if asJSON {
-		out := struct {
-			Symbol      string          `json:"symbol"`
-			Direction   string          `json:"direction"`
-			Definitions []core.SymbolAt `json:"definitions"`
-			Edges       []core.EdgeAt   `json:"edges"`
-		}{symbol, direction, resp.Definitions, resp.Edges}
-		return encodeJSON(cmd, out)
+	projectRoot, err := config.FindProjectRoot()
+	if err != nil {
+		return err
 	}
-	for _, d := range resp.Definitions {
-		fmt.Fprintf(cmd.OutOrStdout(), "def  %s:%d-%d  %s %s  %s\n", d.Path, d.Line, d.EndLine, d.Kind, d.Name, d.Signature)
+
+	result, view, commandType, count := buildTraceResult(symbol, direction, depth, resp)
+	if result.Symbol == nil && result.Graph == nil {
+		return outputTraceResult(result, view)
 	}
-	for _, e := range resp.Edges {
-		fmt.Fprintf(cmd.OutOrStdout(), "call %s:%d  %s → %s\n", e.Path, e.Line, e.Caller, e.Callee)
+	return outputAndRecord(result, view, projectRoot, commandType, count)
+}
+
+// buildTraceResult assembles a v1 trace.TraceResult from a daemon trace
+// response, mirroring v1's assembly (pickBestTargetSymbol for the callers
+// target, pickBestSymbolForFile for caller resolution, first-definition for
+// callees and graph nodes). Pure — unit-tested for shape parity.
+func buildTraceResult(symbol, direction string, depth int, resp service.TraceResponse) (trace.TraceResult, traceViewKind, string, int) {
+	symbols := symbolsAtToV1(resp.Definitions)
+	related := func(name string) []trace.Symbol { return symbolsAtToV1(resp.Related[name]) }
+
+	switch direction {
+	case service.TraceCallees:
+		result := trace.TraceResult{Query: symbol, Mode: traceMode}
+		if len(symbols) == 0 {
+			return result, traceViewCallees, gstats.TraceCallees, 0
+		}
+		result.Symbol = &symbols[0]
+		for _, e := range resp.Edges {
+			calleeSym := trace.Symbol{Name: e.Callee}
+			if calleeSyms := related(e.Callee); len(calleeSyms) > 0 {
+				calleeSym = calleeSyms[0]
+			}
+			result.Callees = append(result.Callees, trace.CalleeInfo{
+				Symbol:   calleeSym,
+				CallSite: trace.CallSite{File: e.Path, Line: e.Line, Context: e.Context},
+			})
+		}
+		return result, traceViewCallees, gstats.TraceCallees, len(result.Callees)
+
+	case service.TraceGraph:
+		g := &trace.CallGraph{Root: symbol, Nodes: map[string]trace.Symbol{}, Edges: []trace.CallEdge{}, Depth: depth}
+		if len(symbols) > 0 {
+			g.Nodes[symbol] = symbols[0]
+		}
+		for _, e := range resp.Edges {
+			g.Edges = append(g.Edges, trace.CallEdge{Caller: e.Caller, Callee: e.Callee, File: e.Path, Line: e.Line})
+			for _, n := range []string{e.Caller, e.Callee} {
+				if _, ok := g.Nodes[n]; !ok {
+					if syms := related(n); len(syms) > 0 {
+						g.Nodes[n] = syms[0]
+					}
+				}
+			}
+		}
+		return trace.TraceResult{Query: symbol, Mode: traceMode, Graph: g}, traceViewGraph, gstats.TraceGraph, len(g.Nodes)
+
+	default: // service.TraceCallers
+		result := trace.TraceResult{Query: symbol, Mode: traceMode}
+		if len(symbols) == 0 {
+			return result, traceViewCallers, gstats.TraceCallers, 0
+		}
+		refs := make([]trace.Reference, 0, len(resp.Edges))
+		for _, e := range resp.Edges {
+			refs = append(refs, trace.Reference{
+				SymbolName: e.Callee, Kind: trace.RefKindCall,
+				File: e.Path, Line: e.Line, Context: e.Context,
+				CallerName: e.Caller, CallerFile: e.Path,
+			})
+		}
+		target := pickBestTargetSymbol(symbols, refs)
+		if target == nil {
+			target = &symbols[0]
+		}
+		result.Symbol = target
+		for _, e := range resp.Edges {
+			callerSym := trace.Symbol{Name: e.Caller, File: e.Path}
+			if callerSyms := related(e.Caller); len(callerSyms) > 0 {
+				if picked := pickBestSymbolForFile(callerSyms, e.Path); picked != nil {
+					callerSym = *picked
+				} else {
+					callerSym = callerSyms[0]
+				}
+			}
+			result.Callers = append(result.Callers, trace.CallerInfo{
+				Symbol:   callerSym,
+				CallSite: trace.CallSite{File: e.Path, Line: e.Line, Context: e.Context},
+			})
+		}
+		return result, traceViewCallers, gstats.TraceCallers, len(result.Callers)
 	}
-	if len(resp.Definitions) == 0 && len(resp.Edges) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "no symbols or edges found for %q\n", symbol)
+}
+
+// symbolsAtToV1 converts daemon symbol definitions to v1 trace.Symbol values
+// (File <- Path; feature_path stays empty — RPG is not daemon-served).
+func symbolsAtToV1(defs []core.SymbolAt) []trace.Symbol {
+	out := make([]trace.Symbol, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, trace.Symbol{
+			Name: d.Name, Kind: trace.SymbolKind(d.Kind), File: d.Path,
+			Line: d.Line, EndLine: d.EndLine, Signature: d.Signature,
+			Receiver: d.Receiver, Package: d.Package, Exported: d.Exported,
+			Language: d.Language, Docstring: d.Docstring,
+		})
 	}
-	return nil
+	return out
 }

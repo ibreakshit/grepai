@@ -151,7 +151,10 @@ v1 inert.
 - **Trace is served by the daemon** for engine:v2 repos: symbols are extracted
   in the build path (regex extractor in CGO-free builds; tree-sitter behind the
   `treesitter` build tag) and stored artifact-scoped in the catalog, so
-  `grepai trace callers|callees|graph` reads the active view. Catalogs written
+  `grepai trace callers|callees|graph` reads the active view. Output renders
+  through v1's own layer (JSON/TOON/UI/text match v1 fast mode); RPG
+  `feature_path`, `--mode precise`, and `--workspace`/`--project` are the
+  documented exceptions (absent / rejected loudly). Catalogs written
   by a pre-trace binary are backfilled automatically on daemon start (CPU-only,
   one repo at a time host-wide, no re-embedding); until backfill completes,
   trace prints a "coverage still building" note with the pending file count.

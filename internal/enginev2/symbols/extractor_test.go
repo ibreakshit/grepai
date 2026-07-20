@@ -2,6 +2,8 @@ package symbols
 
 import (
 	"context"
+
+	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"testing"
 )
 
@@ -58,5 +60,49 @@ func TestExtractUnsupportedLanguageIsEmptyNotError(t *testing.T) {
 	}
 	if len(defs) != 0 && len(edges) != 0 {
 		t.Logf("unexpected but harmless extraction from markdown: %d defs", len(defs))
+	}
+}
+
+// TestExtractPassesV1FieldsThrough guards issue #20: the adapter must not drop
+// the detail fields the v1 extractor produces (receiver/package/exported/
+// language/docstring on symbols; call-site context on edges).
+func TestExtractPassesV1FieldsThrough(t *testing.T) {
+	src := "package store\n\n" +
+		"// Get returns the value for k.\n" +
+		"func (s *Store) Get(k string) string {\n" +
+		"\treturn lookup(k)\n" +
+		"}\n\n" +
+		"func lookup(k string) string { return k }\n"
+	defs, edges, err := New().Extract(context.Background(), "store/store.go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var get *core.SymbolDef
+	for i := range defs {
+		if defs[i].Name == "Get" {
+			get = &defs[i]
+		}
+	}
+	if get == nil {
+		t.Fatalf("Get not extracted: %+v", defs)
+	}
+	// Docstring/Package are produced only by the tree-sitter extractor (v1
+	// precise mode); the regex extractor (v1 fast mode, the CGO-free default)
+	// leaves them empty — parity means passing through whatever the shared
+	// extractor emits, so only the fast-mode fields are asserted here.
+	if get.Language != "go" || !get.Exported || get.Receiver == "" {
+		t.Fatalf("v1 detail fields dropped: %+v", *get)
+	}
+	found := false
+	for _, e := range edges {
+		if e.Caller == "Get" && e.Callee == "lookup" {
+			found = true
+			if e.Context == "" {
+				t.Fatalf("edge context dropped: %+v", e)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("Get->lookup edge missing: %+v", edges)
 	}
 }

@@ -41,7 +41,8 @@ func (c *Catalog) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeI
 // scoping (a retired generation's artifacts are unreachable).
 func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name string) ([]core.SymbolAt, error) {
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT wf.relative_path, s.name, s.kind, s.line, s.end_line, s.signature
+		SELECT wf.relative_path, s.name, s.kind, s.line, s.end_line, s.signature,
+			s.receiver, s.package, s.exported, s.language, s.docstring
 		FROM worktree_files wf
 		JOIN symbols s ON s.artifact_id = wf.artifact_id
 		WHERE wf.worktree_id=? AND s.name=?
@@ -53,9 +54,12 @@ func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, nam
 	var out []core.SymbolAt
 	for rows.Next() {
 		var s core.SymbolAt
-		if err := rows.Scan(&s.Path, &s.Name, &s.Kind, &s.Line, &s.EndLine, &s.Signature); err != nil {
+		var exported int
+		if err := rows.Scan(&s.Path, &s.Name, &s.Kind, &s.Line, &s.EndLine, &s.Signature,
+			&s.Receiver, &s.Package, &exported, &s.Language, &s.Docstring); err != nil {
 			return nil, err
 		}
+		s.Exported = exported != 0
 		out = append(out, s)
 	}
 	return out, rows.Err()
@@ -66,13 +70,13 @@ func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, nam
 // callersOf=false returns edges WHERE caller=name (what it calls).
 func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error) {
 	const byCallee = `
-		SELECT e.caller, e.callee, wf.relative_path, e.line
+		SELECT e.caller, e.callee, wf.relative_path, e.line, e.context
 		FROM worktree_files wf
 		JOIN symbol_edges e ON e.artifact_id = wf.artifact_id
 		WHERE wf.worktree_id=? AND e.callee=?
 		ORDER BY wf.relative_path, e.line`
 	const byCaller = `
-		SELECT e.caller, e.callee, wf.relative_path, e.line
+		SELECT e.caller, e.callee, wf.relative_path, e.line, e.context
 		FROM worktree_files wf
 		JOIN symbol_edges e ON e.artifact_id = wf.artifact_id
 		WHERE wf.worktree_id=? AND e.caller=?
@@ -89,7 +93,7 @@ func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name stri
 	var out []core.EdgeAt
 	for rows.Next() {
 		var e core.EdgeAt
-		if err := rows.Scan(&e.Caller, &e.Callee, &e.Path, &e.Line); err != nil {
+		if err := rows.Scan(&e.Caller, &e.Callee, &e.Path, &e.Line, &e.Context); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

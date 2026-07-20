@@ -284,17 +284,19 @@ func putArtifactSymbolsTx(ctx context.Context, tx *sql.Tx, artifactID core.Artif
 	}
 	for _, d := range defs {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO symbols(artifact_id, name, kind, line, end_line, signature)
-			VALUES(?, ?, ?, ?, ?, ?)`,
-			string(artifactID), d.Name, d.Kind, d.Line, d.EndLine, d.Signature); err != nil {
+			INSERT OR IGNORE INTO symbols(artifact_id, name, kind, line, end_line, signature,
+				receiver, package, exported, language, docstring)
+			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			string(artifactID), d.Name, d.Kind, d.Line, d.EndLine, d.Signature,
+			d.Receiver, d.Package, boolToInt(d.Exported), d.Language, d.Docstring); err != nil {
 			return err
 		}
 	}
 	for _, e := range edges {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO symbol_edges(artifact_id, caller, callee, line)
-			VALUES(?, ?, ?, ?)`,
-			string(artifactID), e.Caller, e.Callee, e.Line); err != nil {
+			INSERT OR IGNORE INTO symbol_edges(artifact_id, caller, callee, line, context)
+			VALUES(?, ?, ?, ?, ?)`,
+			string(artifactID), e.Caller, e.Callee, e.Line, e.Context); err != nil {
 			return err
 		}
 	}
@@ -310,4 +312,11 @@ func (c *Catalog) PutArtifactSymbols(ctx context.Context, artifactID core.Artifa
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
 		return putArtifactSymbolsTx(ctx, tx, artifactID, defs, edges, true)
 	})
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

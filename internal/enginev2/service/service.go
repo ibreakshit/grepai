@@ -97,9 +97,13 @@ type TraceRequest struct {
 // BackfillPending>0 means symbol coverage is still building for this worktree
 // (artifacts committed before extraction existed) — results may be incomplete.
 type TraceResponse struct {
-	WorktreeID      core.WorktreeID
-	Definitions     []core.SymbolAt
-	Edges           []core.EdgeAt
+	WorktreeID  core.WorktreeID
+	Definitions []core.SymbolAt
+	Edges       []core.EdgeAt
+	// Related maps every distinct edge endpoint name (other than the queried
+	// symbol) to its definitions in the same worktree view, so clients can
+	// resolve caller/callee symbols and graph nodes without extra round trips.
+	Related         map[string][]core.SymbolAt
 	BackfillPending int
 	// Served is the capability marker: a trace-capable daemon always sets it.
 	// Pre-trace daemons registered the method but answered inertly; their JSON

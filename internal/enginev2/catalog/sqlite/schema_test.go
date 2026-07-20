@@ -118,8 +118,8 @@ func TestMigration0003UpgradesV2Catalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != 3 {
-		t.Fatalf("schema version after upgrade = %d, want 3", v)
+	if v != schemaVersion {
+		t.Fatalf("schema version after upgrade = %d, want %d", v, schemaVersion)
 	}
 	// Location-aware keys: same (name, kind) at two lines and a repeated
 	// caller->callee at two lines must all insert as distinct rows.
@@ -145,5 +145,15 @@ func TestMigration0003UpgradesV2Catalog(t *testing.T) {
 	if err := c.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM pragma_table_info('file_artifacts') WHERE name='symbols_version'").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("file_artifacts.symbols_version missing (n=%d err=%v)", n, err)
+	}
+	// migration 0004 (v1-parity fields) applied too.
+	for _, col := range []struct{ table, column string }{
+		{"symbols", "receiver"}, {"symbols", "package"}, {"symbols", "exported"},
+		{"symbols", "language"}, {"symbols", "docstring"}, {"symbol_edges", "context"},
+	} {
+		if err := c.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?", col.table, col.column).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("column %s.%s missing after migration0004 (n=%d err=%v)", col.table, col.column, n, err)
+		}
 	}
 }
