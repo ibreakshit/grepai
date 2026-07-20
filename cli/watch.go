@@ -111,6 +111,15 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("flags --background, --status, and --stop are mutually exclusive")
 	}
 
+	// engine:v2 routes to the daemon (v1 per-repo watcher is inert); loud on failure.
+	_, v2, gerr := repoEngineV2()
+	if gerr != nil {
+		return gerr
+	}
+	if v2 {
+		return runWatchDaemon(cmd)
+	}
+
 	// Determine log directory
 	logDir := watchLogDir
 	if logDir == "" {

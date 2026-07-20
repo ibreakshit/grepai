@@ -57,6 +57,11 @@ func chunkParams(cfg *config.Config) (size, overlap int) {
 	return size, overlap
 }
 
+// NewDiskLoader returns the worktree-file ContentLoader used by the one-shot
+// runtime and the daemon. It is stateless (the worktree root arrives per call),
+// so one instance serves every repository.
+func NewDiskLoader() worker.ContentLoader { return diskLoader{} }
+
 // diskLoader loads a file's current bytes from the worktree root. For a clean
 // tracked file this equals the committed content (so its git blob OID matches
 // the reconciler's DesiredHash); for dirty/untracked files it is the current
@@ -184,10 +189,13 @@ func (e *Engine) Index(ctx context.Context) (queued, deadLettered int, err error
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, j := range plan.Jobs {
-		if err := e.cat.UpsertJob(ctx, j); err != nil {
-			return 0, 0, err
-		}
+	// Atomic whole-plan enqueue, same as the daemon's Reconcile: the one-shot
+	// CLI is NOT guaranteed exclusive — a resident grepaid can share this
+	// catalog and commit a partially enqueued job, after which the daemon's
+	// empty-view retry predicate would mistake the plan for complete. One
+	// transaction makes a partial plan impossible on this path too.
+	if err := e.cat.UpsertJobs(ctx, plan.Jobs); err != nil {
+		return 0, 0, err
 	}
 	if err := e.wk.Run(ctx); err != nil {
 		return 0, 0, err
@@ -212,6 +220,11 @@ func (e *Engine) Search(ctx context.Context, query string) ([]core.SearchHit, co
 
 // Close releases the catalog.
 func (e *Engine) Close() error { return e.cat.Close() }
+
+// EnsureSelfIgnore is the exported wrapper the daemon uses to keep a repo's
+// .grepai data directory out of reconciliation (same behavior the one-shot
+// runtime applies in Open).
+func EnsureSelfIgnore(dir, catalogFile string) error { return ensureSelfIgnore(dir, catalogFile) }
 
 // ensureSelfIgnore makes sure the data directory ignores the opened catalog's
 // own files (catalogFile plus its SQLite -wal/-shm siblings), so reconciliation

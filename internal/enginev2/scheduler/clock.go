@@ -10,3 +10,14 @@ type Clock interface {
 	// After returns a channel that receives once d has elapsed on this clock.
 	After(d time.Duration) <-chan time.Time
 }
+
+// SystemClock is the production Clock backed by the real monotonic clock.
+type SystemClock struct{}
+
+var _ Clock = SystemClock{}
+
+// Now returns the current wall-clock time.
+func (SystemClock) Now() time.Time { return time.Now() }
+
+// After delegates to time.After.
+func (SystemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }

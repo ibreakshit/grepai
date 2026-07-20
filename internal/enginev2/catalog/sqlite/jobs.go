@@ -51,6 +51,50 @@ func (c *Catalog) DeleteJobsForWorktree(ctx context.Context, wt core.WorktreeID)
 	})
 }
 
+// RollWorktreeGeneration atomically drops a worktree's file view AND its queued
+// jobs AND activates the given generation — the daemon's fingerprint rollover.
+// All three must be ONE write transaction: without clearing, reconciliation
+// would see the old generation's indexed hashes (the view is not
+// generation-filtered) and search would keep serving incompatible vectors; and
+// if clear and activate were separate transactions, an in-flight worker commit
+// under the still-active old generation could repopulate the view between them
+// (it passes the invariant-12 active-generation guard), permanently stranding
+// stale rows once activation makes the fingerprint match. Single-writer
+// serialization (writeMu + one tx) means a concurrent commit lands either
+// before (its rows are cleared here) or after (the guard rejects its
+// now-inactive generation). Artifacts and cached chunk vectors are left in
+// place — content+fingerprint addressed, so the new fingerprint simply misses
+// them.
+func (c *Catalog) RollWorktreeGeneration(ctx context.Context, wt core.WorktreeID, repo core.RepositoryID, gen core.Generation) error {
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM worktree_files WHERE worktree_id=?`, string(wt)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM index_jobs WHERE worktree_id=?`, string(wt)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE index_generations SET status='retired'
+			WHERE repository_id=? AND status='active'`, string(repo)); err != nil {
+			return err
+		}
+		res, err := tx.ExecContext(ctx, `
+			UPDATE index_generations SET status='active'
+			WHERE repository_id=? AND generation=?`, string(repo), int64(gen))
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNoSuchGeneration
+		}
+		return nil
+	})
+}
+
 // RequeueClaimedJobs releases every claimed job so a restarted worker can
 // re-claim work a crashed worker left in flight (invariant 7 recovery).
 func (c *Catalog) RequeueClaimedJobs(ctx context.Context) (int, error) {

@@ -1,6 +1,7 @@
-.PHONY: build install test clean lint run docs docs-generate docs-build docs-dev fmt pre-commit nix-hash
+.PHONY: build build-daemon build-all-bins install install-daemon test clean lint run docs docs-generate docs-build docs-dev fmt pre-commit nix-hash
 
 BINARY_NAME=grepai
+DAEMON_NAME=grepaid
 VERSION?=0.1.0
 BUILD_DIR=bin
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
@@ -8,8 +9,19 @@ LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 build:
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/grepai
 
+# build-daemon builds the grepaid host daemon (v2 engine). The grepai CLI finds
+# it on PATH or as a sibling of the grepai binary, so build both into $(BUILD_DIR).
+build-daemon:
+	go build $(LDFLAGS) -o $(BUILD_DIR)/$(DAEMON_NAME) ./cmd/grepaid
+
+# build-all-bins builds both the CLI and the daemon into $(BUILD_DIR).
+build-all-bins: build build-daemon
+
 install:
 	go install $(LDFLAGS) ./cmd/grepai
+
+install-daemon:
+	go install $(LDFLAGS) ./cmd/grepaid
 
 test:
 	go test -v -race ./...

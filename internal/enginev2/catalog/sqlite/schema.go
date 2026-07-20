@@ -10,6 +10,10 @@ import (
 // migration when the schema changes.
 const schemaVersion = 2
 
+// LatestSchemaVersion is the schema version this binary migrates a catalog to.
+// The daemon refuses to open a catalog stamped newer than this.
+const LatestSchemaVersion = schemaVersion
+
 // migration0001 is the initial schema. Vectors are little-endian float32
 // blobs whose byte length equals dimensions*4 (validated in Go, not SQL).
 const migration0001 = `
@@ -121,6 +125,13 @@ ALTER TABLE artifact_chunks ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0;
 `
 
 var migrations = []string{migration0001, migration0002}
+
+// SchemaVersion returns the highest applied migration version (0 on a fresh DB).
+// Exported so the daemon can guard against opening a catalog written by a newer
+// binary (schema too new -> skip rather than risk corruption).
+func (c *Catalog) SchemaVersion(ctx context.Context) (int, error) {
+	return c.schemaVersion(ctx)
+}
 
 // schemaVersion (method) returns the highest applied migration version, or 0.
 func (c *Catalog) schemaVersion(ctx context.Context) (int, error) {

@@ -73,7 +73,16 @@ type Config struct {
 	Update            UpdateConfig    `yaml:"update"`
 	Ignore            []string        `yaml:"ignore"`
 	ExternalGitignore string          `yaml:"external_gitignore,omitempty"`
+	// Engine selects the indexing engine for this repo: "" or "v1" (default) is
+	// the classic per-repo engine; "v2" routes commands to the grepaid daemon and
+	// makes v1 inert for this repo. The daemon and its socket are host-level
+	// (GREPAID_SOCKET / daemon.json) — a per-repo socket would be incoherent
+	// with the single host daemon and its singleton lock.
+	Engine string `yaml:"engine,omitempty"`
 }
+
+// EngineV2 reports whether this repo is configured to use the v2 daemon engine.
+func (c *Config) EngineV2() bool { return c.Engine == "v2" }
 
 // UpdateConfig holds auto-update settings
 type UpdateConfig struct {

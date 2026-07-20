@@ -201,6 +201,16 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--compact flag requires --json or --toon flag")
 	}
 
+	// engine:v2 routes to the daemon (v1 is inert for this repo); a broken v2
+	// fails loudly rather than silently serving v1.
+	_, v2, gerr := repoEngineV2()
+	if gerr != nil {
+		return gerr
+	}
+	if v2 {
+		return runSearchDaemon(cmd, args)
+	}
+
 	// Validate workspace-related flags
 	if len(searchProjects) > 0 && searchWorkspace == "" {
 		return fmt.Errorf("--project flag requires --workspace flag")

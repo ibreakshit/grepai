@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -29,6 +30,9 @@ type Catalog interface {
 	WorktreePathsPending(ctx context.Context, wt core.WorktreeID, paths []string) (bool, error)
 	DeadLetterCount(ctx context.Context) (int, error)
 	UpsertJob(ctx context.Context, job core.Job) error
+	// UpsertJobs enqueues a whole reconcile plan atomically: all or nothing, so
+	// a midway failure can never leave a partially queued plan behind.
+	UpsertJobs(ctx context.Context, jobs []core.Job) error
 }
 
 // Reconciler computes a worktree's convergence plan (satisfied by *reconcile.Engine).
@@ -82,23 +86,26 @@ func (s *Server) Register(ctx context.Context, req RegisterRequest) (RegisterRes
 	return RegisterResponse{RepositoryID: repo, WorktreeID: wt}, nil
 }
 
-// Reconcile computes the worktree's plan and durably enqueues it. This is an
-// administrative path — enqueueing jobs is expected (unlike query paths).
+// Reconcile computes the worktree's plan and durably enqueues it ATOMICALLY
+// (one transaction for the whole plan): an interrupted reconcile leaves either
+// every desired intent queued or none — never a partial plan that a later
+// retry could mistake for complete. This is an administrative path — enqueueing
+// jobs is expected (unlike query paths).
 func (s *Server) Reconcile(ctx context.Context, req ReconcileRequest) (ReconcileResponse, error) {
 	plan, err := s.rec.Reconcile(ctx, req.WorktreeID)
 	if err != nil {
 		return ReconcileResponse{}, err
 	}
-	for _, job := range plan.Jobs {
-		if err := s.cat.UpsertJob(ctx, job); err != nil {
-			return ReconcileResponse{}, err
-		}
+	if err := s.cat.UpsertJobs(ctx, plan.Jobs); err != nil {
+		return ReconcileResponse{}, err
 	}
 	return ReconcileResponse{JobsQueued: len(plan.Jobs)}, nil
 }
 
 // Search embeds the query once and ranks the worktree's active-view chunks. It
-// enqueues no work.
+// enqueues no work. Limit<=0 uses the server default; PathPrefix filters hits
+// to paths under the prefix (the catalog is over-fetched when filtering so a
+// narrow prefix still fills the limit).
 func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	q, err := s.emb.Embed(ctx, req.Query)
 	if err != nil {
@@ -107,9 +114,40 @@ func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 	if err := validateQueryVector(q, s.emb.Dimensions()); err != nil {
 		return SearchResponse{}, err
 	}
-	hits, err := s.cat.SearchWorktree(ctx, req.WorktreeID, q, s.limit)
+	const maxFetch = 2000
+	limit := req.Limit
+	if limit <= 0 {
+		limit = s.limit
+	}
+	if limit > maxFetch {
+		limit = maxFetch // also bounds a hostile/huge -n
+	}
+	fetch := limit
+	if req.PathPrefix != "" {
+		// Over-fetch so post-filtering can still fill the limit; bounded (and
+		// computed overflow-safely) so a large limit cannot wrap or force an
+		// unbounded scan.
+		if limit >= maxFetch/20 {
+			fetch = maxFetch
+		} else {
+			fetch = limit * 20
+		}
+	}
+	hits, err := s.cat.SearchWorktree(ctx, req.WorktreeID, q, fetch)
 	if err != nil {
 		return SearchResponse{}, err
+	}
+	if req.PathPrefix != "" {
+		filtered := hits[:0]
+		for _, h := range hits {
+			if strings.HasPrefix(h.Path, req.PathPrefix) {
+				filtered = append(filtered, h)
+			}
+		}
+		hits = filtered
+	}
+	if len(hits) > limit {
+		hits = hits[:limit]
 	}
 	gen, pending, err := s.genAndPending(ctx, req.WorktreeID)
 	if err != nil {
