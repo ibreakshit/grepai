@@ -102,8 +102,10 @@ func (c *FakeCatalog) UpsertJob(ctx context.Context, job core.Job) error {
 	return nil
 }
 
-// UpsertJobs enqueues a whole plan. The in-memory fake is trivially atomic
-// (single mutex, no partial-failure mode), so it simply applies each upsert.
+// UpsertJobs enqueues a whole plan. The fake is FAILURE-atomic (its upserts
+// cannot fail, so a partial batch never persists) but not visibility-atomic:
+// each upsert locks separately, so a concurrent reader may observe a prefix.
+// Tests needing visibility atomicity must use the real sqlite catalog.
 func (c *FakeCatalog) UpsertJobs(ctx context.Context, jobs []core.Job) error {
 	for _, job := range jobs {
 		if err := c.UpsertJob(ctx, job); err != nil {

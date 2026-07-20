@@ -296,14 +296,14 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 	}
 
 	// Unified needs-reconcile predicate: an EMPTY VIEW means this worktree is
-	// unindexed — brand new, cleared by a fingerprint roll, a recreated catalog,
-	// or a PARTIALLY-enqueued prior reconcile that failed midway (plan jobs are
-	// enqueued one tx at a time, so pending>0 does NOT prove the plan is
-	// complete). Reconcile is idempotent (UpsertJob re-asserts the same desired
-	// intents), so re-running with jobs already pending is harmless and makes
-	// every retry converge on the FULL plan. This is a durable state check, not
-	// a fragile registered-before flag. (Invariant 3 intact: Register is a
-	// mutation path; queries still never enqueue.)
+	// unindexed — brand new, cleared by a fingerprint roll, a recreated
+	// catalog, or an interrupted prior reconcile. Plans are enqueued
+	// ATOMICALLY (UpsertJobs, one tx — daemon and one-shot CLI alike), so an
+	// interrupted reconcile leaves zero jobs and this retry re-plans the whole
+	// set; reconcile is also idempotent, so re-running with jobs pending is
+	// harmless. This is a durable state check, not a fragile registered-before
+	// flag. (Invariant 3 intact: Register is a mutation path; queries still
+	// never enqueue.)
 	indexed, err := s.set.WorktreeIndexedHashes(ctx, resp.WorktreeID)
 	if err != nil {
 		return resp, err

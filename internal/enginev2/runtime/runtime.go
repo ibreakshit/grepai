@@ -189,10 +189,13 @@ func (e *Engine) Index(ctx context.Context) (queued, deadLettered int, err error
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, j := range plan.Jobs {
-		if err := e.cat.UpsertJob(ctx, j); err != nil {
-			return 0, 0, err
-		}
+	// Atomic whole-plan enqueue, same as the daemon's Reconcile: the one-shot
+	// CLI is NOT guaranteed exclusive — a resident grepaid can share this
+	// catalog and commit a partially enqueued job, after which the daemon's
+	// empty-view retry predicate would mistake the plan for complete. One
+	// transaction makes a partial plan impossible on this path too.
+	if err := e.cat.UpsertJobs(ctx, plan.Jobs); err != nil {
+		return 0, 0, err
 	}
 	if err := e.wk.Run(ctx); err != nil {
 		return 0, 0, err
