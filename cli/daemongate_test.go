@@ -161,6 +161,17 @@ func TestBuildTraceResultV1Shape(t *testing.T) {
 		t.Fatalf("callee fallback wrong: %+v", cRes.Callees)
 	}
 
+	// Self-caller (recursion / same-named symbol elsewhere): resolves from
+	// Definitions, not the Line-0 fallback — v1 parity via LookupSymbol.
+	respSelf := resp
+	respSelf.Definitions = append([]core.SymbolAt{}, resp.Definitions...)
+	respSelf.Definitions = append(respSelf.Definitions, core.SymbolAt{Path: "other/dup.go", Name: "Get", Kind: "function", Line: 77})
+	respSelf.Edges = []core.EdgeAt{{Caller: "Get", Callee: "Get", Path: "other/dup.go", Line: 80, Context: "\treturn Get(k)"}}
+	sRes, _, _, _ := buildTraceResult("Get", service.TraceCallers, 0, respSelf)
+	if len(sRes.Callers) != 1 || sRes.Callers[0].Symbol.Line != 77 || sRes.Callers[0].Symbol.File != "other/dup.go" {
+		t.Fatalf("self-caller must resolve to its file's definition: %+v", sRes.Callers)
+	}
+
 	// Empty definitions: v1 renders an empty result (Symbol nil), never errors.
 	eRes, _, _, eCount := buildTraceResult("Nope", service.TraceCallers, 0, service.TraceResponse{Served: true})
 	if eRes.Symbol != nil || eCount != 0 {

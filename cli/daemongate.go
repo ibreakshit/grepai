@@ -277,7 +277,16 @@ func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int) err
 // callees and graph nodes). Pure — unit-tested for shape parity.
 func buildTraceResult(symbol, direction string, depth int, resp service.TraceResponse) (trace.TraceResult, traceViewKind, string, int) {
 	symbols := symbolsAtToV1(resp.Definitions)
-	related := func(name string) []trace.Symbol { return symbolsAtToV1(resp.Related[name]) }
+	// The queried symbol's own definitions live in Definitions, not Related —
+	// a self-caller (recursion, or the extractor attributing a call site to a
+	// same-named symbol in another file) must resolve like any other endpoint,
+	// exactly as v1's LookupSymbol did.
+	related := func(name string) []trace.Symbol {
+		if name == symbol {
+			return symbols
+		}
+		return symbolsAtToV1(resp.Related[name])
+	}
 
 	switch direction {
 	case service.TraceCallees:
