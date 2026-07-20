@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +34,8 @@ type Catalog interface {
 	// UpsertJobs enqueues a whole reconcile plan atomically: all or nothing, so
 	// a midway failure can never leave a partially queued plan behind.
 	UpsertJobs(ctx context.Context, jobs []core.Job) error
+	// Worktrees lists every registered worktree (cross-repo fan-out queries).
+	Worktrees(ctx context.Context) ([]core.WorktreeID, error)
 }
 
 // Reconciler computes a worktree's convergence plan (satisfied by *reconcile.Engine).
@@ -167,6 +170,78 @@ func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 		ActiveGeneration: gen,
 		Fresh:            pending == 0,
 	}, nil
+}
+
+// SearchAll embeds the query ONCE and fans it out across every registered
+// worktree, merging by score. Scores are comparable across repos because the
+// daemon indexes everything under one host-global embedder+fingerprint.
+// Isolation stays structural: each per-worktree search runs against that
+// worktree's own view; this is explicit multi-repo OUTPUT, tagged per hit —
+// never leakage into a single repo's results. A worktree whose search fails is
+// skipped and reported (quarantine-lite); it never sinks the whole query.
+// Query path: embeds + reads only, never enqueues (invariant 3).
+func (s *Server) SearchAll(ctx context.Context, req SearchAllRequest) (SearchAllResponse, error) {
+	q, err := s.emb.Embed(ctx, req.Query)
+	if err != nil {
+		return SearchAllResponse{}, err
+	}
+	if err := validateQueryVector(q, s.emb.Dimensions()); err != nil {
+		return SearchAllResponse{}, err
+	}
+	const maxFetch = 2000
+	limit := req.Limit
+	if limit <= 0 {
+		limit = s.limit
+	}
+	if limit > maxFetch {
+		limit = maxFetch
+	}
+	perRepo := limit // each repo can contribute at most the global limit
+	if req.PathPrefix != "" {
+		if perRepo >= maxFetch/20 {
+			perRepo = maxFetch
+		} else {
+			perRepo = perRepo * 20
+		}
+	}
+
+	wts, err := s.cat.Worktrees(ctx)
+	if err != nil {
+		return SearchAllResponse{}, err
+	}
+	var resp SearchAllResponse
+	for _, wt := range wts {
+		hits, herr := s.cat.SearchWorktree(ctx, wt, q, perRepo)
+		if herr != nil {
+			resp.Skipped = append(resp.Skipped, wt)
+			continue
+		}
+		if req.PathPrefix != "" {
+			filtered := hits[:0]
+			for _, h := range hits {
+				if strings.HasPrefix(h.Path, req.PathPrefix) {
+					filtered = append(filtered, h)
+				}
+			}
+			hits = filtered
+		}
+		if len(hits) > limit {
+			hits = hits[:limit]
+		}
+		for _, h := range hits {
+			resp.Results = append(resp.Results, RepoHit{Worktree: wt, Hit: h})
+		}
+		if pending, perr := s.cat.WorktreePendingCount(ctx, wt); perr == nil && pending > 0 {
+			resp.Stale = append(resp.Stale, wt)
+		}
+	}
+	sort.SliceStable(resp.Results, func(i, j int) bool {
+		return resp.Results[i].Hit.Score > resp.Results[j].Hit.Score
+	})
+	if len(resp.Results) > limit {
+		resp.Results = resp.Results[:limit]
+	}
+	return resp, nil
 }
 
 // Trace is inert this phase: symbol extraction is deferred, so it returns no

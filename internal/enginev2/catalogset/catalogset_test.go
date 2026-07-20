@@ -150,3 +150,27 @@ func TestChunkCacheSharesHandleAndErrorsForUnknown(t *testing.T) {
 		t.Fatalf("ChunkCache(unknown) = %v; want ErrUnknownRepo", err)
 	}
 }
+
+func TestWorktreesUnionAcrossMembers(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+	defer s.Close()
+	for _, id := range []string{"/b", "/a"} {
+		if err := s.Add(ctx, core.RepositoryID(id), filepath.Join(t.TempDir(), "c.db")); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RegisterRepository(ctx, core.RepositoryID(id), id, ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RegisterWorktree(ctx, core.WorktreeID(id), core.RepositoryID(id), id, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wts, err := s.Worktrees(ctx)
+	if err != nil {
+		t.Fatalf("Worktrees: %v", err)
+	}
+	if len(wts) != 2 || wts[0] != "/a" || wts[1] != "/b" {
+		t.Fatalf("Worktrees union = %v, want sorted [/a /b]", wts)
+	}
+}

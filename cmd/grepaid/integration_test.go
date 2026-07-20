@@ -391,3 +391,60 @@ func TestWatcherAutoFreshness(t *testing.T) {
 		t.Fatalf("repo did not settle fresh after watcher indexing (pending=%d) — possible self-trigger loop", st.Pending)
 	}
 }
+
+// TestSearchAllAcrossRepos proves the cross-repo fan-out end-to-end: two repos
+// registered with the daemon, one query returns tagged hits from BOTH — while a
+// plain per-repo Search still sees only its own repo (isolation preserved).
+func TestSearchAllAcrossRepos(t *testing.T) {
+	p := setHostEnv(t)
+	fxA := enginetest.NewGitFixture(t)
+	fxA.WriteFile("alpha.go", "package a // shared metric harvest logic")
+	fxA.Commit("a")
+	fxB := enginetest.NewGitFixture(t)
+	fxB.WriteFile("beta.go", "package b // shared metric harvest logic too")
+	fxB.Commit("b")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runWithEmbedder(ctx, p, testConfig(), enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	defer func() { cancel(); <-done }()
+
+	c := dialWithRetry(t, p.Socket, 3*time.Second)
+	defer c.Close()
+	regA, err := c.Register(context.Background(), service.RegisterRequest{Root: fxA.Root()})
+	if err != nil {
+		t.Fatalf("Register A: %v", err)
+	}
+	regB, err := c.Register(context.Background(), service.RegisterRequest{Root: fxB.Root()})
+	if err != nil {
+		t.Fatalf("Register B: %v", err)
+	}
+	waitFresh(t, c, regA.WorktreeID, 5*time.Second)
+	waitFresh(t, c, regB.WorktreeID, 5*time.Second)
+
+	resp, err := c.SearchAll(context.Background(), service.SearchAllRequest{Query: "shared metric harvest", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchAll: %v", err)
+	}
+	got := map[core.WorktreeID]string{}
+	for _, r := range resp.Results {
+		got[r.Worktree] = r.Hit.Path
+	}
+	if got[regA.WorktreeID] != "alpha.go" || got[regB.WorktreeID] != "beta.go" {
+		t.Fatalf("SearchAll should return tagged hits from BOTH repos, got %+v", got)
+	}
+	if len(resp.Skipped) != 0 {
+		t.Fatalf("no repo should be skipped, got %+v", resp.Skipped)
+	}
+
+	// Isolation control: plain Search in A still only sees A.
+	single, err := c.Search(context.Background(), service.SearchRequest{WorktreeID: regA.WorktreeID, Query: "shared metric harvest"})
+	if err != nil {
+		t.Fatalf("Search A: %v", err)
+	}
+	for _, h := range single.Results {
+		if h.Path == "beta.go" {
+			t.Fatal("ISOLATION BREACH: single-repo search returned another repo's file")
+		}
+	}
+}

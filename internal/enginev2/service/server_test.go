@@ -233,3 +233,54 @@ func TestTraceInert(t *testing.T) {
 		t.Fatalf("trace must be inert: resp=%+v err=%v", resp, err)
 	}
 }
+
+func TestSearchAllMergesAcrossWorktreesWithTags(t *testing.T) {
+	ctx := context.Background()
+	c, emb, s := newServer(t)
+	// Two repos/worktrees in one catalog; FakeEmbedder vectors are content-
+	// derived, so querying with wa's exact content ranks wa's hit first.
+	seedWorktreeArtifact(t, c, emb, "ra", "wa", "a.go", "alpha content")
+	seedWorktreeArtifact(t, c, emb, "rb", "wb", "b.go", "beta material")
+
+	resp, err := s.SearchAll(ctx, service.SearchAllRequest{Query: "alpha content", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("want hits from both worktrees, got %d: %+v", len(resp.Results), resp.Results)
+	}
+	// Tagged correctly and ranked: the exact-match repo first.
+	if resp.Results[0].Worktree != "wa" || resp.Results[0].Hit.Path != "a.go" {
+		t.Fatalf("top hit should be wa/a.go, got %s/%s", resp.Results[0].Worktree, resp.Results[0].Hit.Path)
+	}
+	if resp.Results[1].Worktree != "wb" {
+		t.Fatalf("second hit should be tagged wb, got %s", resp.Results[1].Worktree)
+	}
+	if resp.Results[0].Hit.Score <= resp.Results[1].Hit.Score {
+		t.Fatalf("results not score-ordered: %f <= %f", resp.Results[0].Hit.Score, resp.Results[1].Hit.Score)
+	}
+	if len(resp.Skipped) != 0 || len(resp.Stale) != 0 {
+		t.Fatalf("unexpected skipped/stale: %+v / %+v", resp.Skipped, resp.Stale)
+	}
+}
+
+func TestSearchAllLimitAndStale(t *testing.T) {
+	ctx := context.Background()
+	c, emb, s := newServer(t)
+	seedWorktreeArtifact(t, c, emb, "ra", "wa", "a.go", "gamma one")
+	seedWorktreeArtifact(t, c, emb, "rb", "wb", "b.go", "gamma two")
+	// Pending job in wb -> it must be reported stale.
+	if err := c.UpsertJob(ctx, core.Job{WorktreeID: "wb", Path: "pending.go", DesiredHash: "h", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := s.SearchAll(ctx, service.SearchAllRequest{Query: "gamma", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("limit=1 must cap merged results, got %d", len(resp.Results))
+	}
+	if len(resp.Stale) != 1 || resp.Stale[0] != "wb" {
+		t.Fatalf("wb should be reported stale, got %+v", resp.Stale)
+	}
+}
