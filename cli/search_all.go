@@ -2,11 +2,13 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/rpc"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
 )
 
@@ -72,6 +74,10 @@ func runSearchAll(cmd *cobra.Command, args []string) error {
 		PathPrefix: searchAllPath,
 	})
 	if err != nil {
+		var rpcErr *rpc.Error
+		if errors.As(err, &rpcErr) && rpcErr.Code == rpc.CodeMethodNotFound {
+			return fmt.Errorf("search-all: the running grepaid predates this command — restart it (`grepai daemon stop` then any grepai command) after installing the new binary")
+		}
 		return fmt.Errorf("search-all: %w", err)
 	}
 	for _, wt := range resp.Skipped {
