@@ -14,6 +14,7 @@ type Catalog interface {
 	WorktreeInfo(ctx context.Context, wt core.WorktreeID) (string, core.RepositoryID, error)
 	GenerationFingerprint(ctx context.Context, repo core.RepositoryID, gen core.Generation) (string, error)
 	GetArtifact(ctx context.Context, key core.ArtifactKey) (core.Artifact, bool, error)
+	ArtifactSymbolsCurrent(ctx context.Context, key core.ArtifactKey) (bool, error)
 	PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error
 	CommitUpdate(ctx context.Context, req core.CommitRequest, job core.Job) error
 	CommitDelete(ctx context.Context, wt core.WorktreeID, relPath string, gen core.Generation, job core.Job) error
@@ -191,13 +192,23 @@ func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, art
 		Chunks:   art.Chunks, // nil for a whole-file cache hit (mapping already present)
 	}
 	// Symbol extraction (artifact-scoped derived data, spec §5.3). A whole-file
-	// cache hit reuses an artifact whose symbols were extracted when it was
-	// first committed — no work. Extraction errors are non-fatal: the artifact
-	// still commits, SymbolsExtracted stays false, and the daemon backfill
-	// retries later.
-	if w.symbols != nil && !wholeHit {
-		if defs, edges, serr := w.symbols.Extract(ctx, job.Path, string(content)); serr == nil {
-			req.Symbols, req.SymbolEdges, req.SymbolsExtracted = defs, edges, true
+	// cache hit usually reuses an artifact whose symbols were extracted when it
+	// was first committed — but a cache hit can also RE-ACTIVATE an artifact
+	// committed by a pre-trace binary (e.g. a revert), and the one-shot daemon
+	// backfill will not rescan, so a stale symbol version must be repaired
+	// here. Extraction errors are non-fatal: the artifact still commits,
+	// SymbolsExtracted stays false, and the daemon backfill retries later.
+	if w.symbols != nil {
+		needsSymbols := true
+		if wholeHit {
+			if current, cerr := w.cat.ArtifactSymbolsCurrent(ctx, key); cerr == nil && current {
+				needsSymbols = false
+			}
+		}
+		if needsSymbols {
+			if defs, edges, serr := w.symbols.Extract(ctx, job.Path, string(content)); serr == nil {
+				req.Symbols, req.SymbolEdges, req.SymbolsExtracted = defs, edges, true
+			}
 		}
 	}
 	if err := w.cat.CommitUpdate(ctx, req, job); err != nil {

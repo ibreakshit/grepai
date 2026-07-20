@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
@@ -93,4 +95,21 @@ func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name stri
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ArtifactSymbolsCurrent reports whether the artifact's symbols were extracted
+// by the current extractor version. Missing artifact reads as not-current (the
+// caller then extracts, which is always safe under replace semantics).
+func (c *Catalog) ArtifactSymbolsCurrent(ctx context.Context, key core.ArtifactKey) (bool, error) {
+	var v int
+	err := c.db.QueryRowContext(ctx,
+		`SELECT symbols_version FROM file_artifacts WHERE artifact_id=?`,
+		string(key.ArtifactID())).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return v >= SymbolsVersionCurrent, nil
 }

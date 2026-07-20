@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -370,5 +371,39 @@ func TestSearchAllLimitAndStale(t *testing.T) {
 	}
 	if len(resp.Stale) != 1 || resp.Stale[0] != "wb" {
 		t.Fatalf("wb should be reported stale, got %+v", resp.Stale)
+	}
+}
+
+// TestTraceGraphFanoutIsBounded seeds a root whose fanout exceeds
+// maxGraphSymbols (600 callees, each calling one further leaf) and asserts the
+// admission-checked caps hold: all first-level edges return, but second-level
+// expansion is cut off at the visited-symbol cap instead of doubling the
+// response.
+func TestTraceGraphFanoutIsBounded(t *testing.T) {
+	ctx := context.Background()
+	c, _, s := newServer(t)
+	defs := []core.SymbolDef{{Name: "Run", Kind: "function", Line: 1}}
+	var edges []core.SymbolEdge
+	for i := 0; i < 600; i++ {
+		callee := fmt.Sprintf("Callee%03d", i)
+		edges = append(edges, core.SymbolEdge{Caller: "Run", Callee: callee, Line: i + 2})
+		edges = append(edges, core.SymbolEdge{Caller: callee, Callee: fmt.Sprintf("Leaf%03d", i), Line: i + 1000})
+	}
+	seedSymbols(t, c, "r", "w", "big.go", defs, edges)
+
+	resp, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "Run", Direction: service.TraceGraph, Depth: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Edges) < 600 {
+		t.Fatalf("first-level edges must all return, got %d", len(resp.Edges))
+	}
+	// Unbounded expansion would return all 1200 edges; the ~500-symbol
+	// admission cap must cut the second level short.
+	if len(resp.Edges) >= 1200 {
+		t.Fatalf("visited-symbol cap did not bound expansion: %d edges", len(resp.Edges))
+	}
+	if len(resp.Edges) > 2000 {
+		t.Fatalf("edge cap exceeded: %d", len(resp.Edges))
 	}
 }

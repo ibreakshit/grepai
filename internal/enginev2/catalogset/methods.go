@@ -286,6 +286,14 @@ func (s *Set) GetArtifact(ctx context.Context, key core.ArtifactKey) (core.Artif
 	return c.GetArtifact(ctx, key)
 }
 
+func (s *Set) ArtifactSymbolsCurrent(ctx context.Context, key core.ArtifactKey) (bool, error) {
+	c, err := s.get(key.RepositoryID)
+	if err != nil {
+		return false, err
+	}
+	return c.ArtifactSymbolsCurrent(ctx, key)
+}
+
 // --- fan-out aggregates ---
 //
 // Aggregates SKIP a member whose read fails (reporting it via OnAggregateError)

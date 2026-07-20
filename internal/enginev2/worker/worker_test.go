@@ -252,3 +252,41 @@ func TestWholeFileCacheHitSkipsExtraction(t *testing.T) {
 		t.Fatalf("cache hit must skip extraction; extractor calls = %d", fx.calls)
 	}
 }
+
+// TestCacheHitRepairsStaleSymbols guards the revert scenario: an artifact
+// committed by a pre-trace binary (no extractor → symbols_version=0) can be
+// RE-ACTIVATED later via a whole-file cache hit; the worker must notice the
+// stale symbol version and extract, because the daemon's one-shot backfill
+// will not rescan the worktree.
+func TestCacheHitRepairsStaleSymbols(t *testing.T) {
+	ctx := context.Background()
+	emb := enginetest.NewFakeEmbedder(4)
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c)
+
+	// Pre-trace commit: no extractor wired.
+	w1 := worker.New(c, realBuilder(emb, c), staticLoader{content: []byte("func main() {}")}, worker.NoCrash, 5)
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	if _, err := w1.ProcessOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if miss, err := c.ArtifactsMissingSymbols(ctx, "w"); err != nil || len(miss) != 1 {
+		t.Fatalf("pre-trace artifact should be missing symbols: %+v err=%v", miss, err)
+	}
+
+	// Same content re-indexed by a trace-capable worker: whole-file cache hit,
+	// but the stale symbol version must trigger extraction.
+	fx := &fakeExtractor{}
+	w2 := worker.New(c, realBuilder(emb, c), staticLoader{content: []byte("func main() {}")}, worker.NoCrash, 5)
+	w2.SetSymbolExtractor(fx)
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	if _, err := w2.ProcessOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.calls != 1 {
+		t.Fatalf("stale-symbol cache hit must extract; extractor calls = %d", fx.calls)
+	}
+	if miss, err := c.ArtifactsMissingSymbols(ctx, "w"); err != nil || len(miss) != 0 {
+		t.Fatalf("cache-hit repair left artifact stale: %+v err=%v", miss, err)
+	}
+}

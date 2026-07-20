@@ -298,11 +298,15 @@ func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, er
 	return resp, nil
 }
 
-// maxGraphSymbols bounds BFS breadth: expansion stops once this many symbols
-// have been visited, keeping worst-case catalog queries (2 per symbol) and
-// response size finite on densely connected graphs. Edges already discovered
-// are kept, so a truncated graph is a prefix, not an error.
-const maxGraphSymbols = 500
+// maxGraphSymbols / maxGraphEdges strictly bound BFS breadth and response
+// size: no symbol is admitted to the frontier once maxGraphSymbols names have
+// been visited (admission-checked, so a single high-fanout symbol cannot blow
+// past it), and expansion stops entirely at maxGraphEdges output edges. A
+// truncated graph is a prefix, not an error.
+const (
+	maxGraphSymbols = 500
+	maxGraphEdges   = 2000
+)
 
 // traceGraph BFS-expands both directions from root up to depth levels,
 // deduplicating edges. Level-by-level catalog queries keep it simple; depth is
@@ -334,8 +338,11 @@ func (s *Server) traceGraph(ctx context.Context, wt core.WorktreeID, root string
 					}
 					seenEdge[k] = true
 					out = append(out, e)
+					if len(out) >= maxGraphEdges {
+						return out, nil
+					}
 					for _, n := range []string{e.Caller, e.Callee} {
-						if !visited[n] {
+						if !visited[n] && len(visited) < maxGraphSymbols {
 							visited[n] = true
 							next = append(next, n)
 						}
