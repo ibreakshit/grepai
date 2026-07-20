@@ -147,6 +147,40 @@ func resolveMCPTarget(explicitPath, workspaceName string) (string, string, error
 	return "", "", fmt.Errorf("no grepai project or workspace found (run 'grepai init' or use --workspace)")
 }
 
+// rejectEngineV2ForMCP enforces the loud-failure contract for MCP: the MCP
+// server reads the v1 store, and on an engine:v2 repo the v1 index is retired —
+// serving it would return empty results with no error (issue #8). Until MCP is
+// served from the daemon (issue #10), an engine:v2 project — or a workspace
+// containing one — refuses to start, loudly. A project whose config cannot be
+// loaded is left to fail downstream exactly as before.
+func rejectEngineV2ForMCP(projectRoot, wsName string) error {
+	if projectRoot != "" {
+		if cfg, err := config.Load(projectRoot); err == nil && cfg.EngineV2() {
+			return fmt.Errorf("mcp-serve is not supported under engine: v2 yet (%s): the v1 index it serves is retired on this repo, and serving it would return empty results silently. Use the CLI (`grepai search`, `grepai search-all`) until MCP is daemon-served (ibreakshit/grepai#10)", projectRoot)
+		}
+	}
+	if wsName != "" {
+		wcfg, err := config.LoadWorkspaceConfig()
+		if err != nil || wcfg == nil {
+			return nil // workspace resolution already validated upstream
+		}
+		ws, err := wcfg.GetWorkspace(wsName)
+		if err != nil {
+			return nil
+		}
+		var v2Members []string
+		for _, p := range ws.Projects {
+			if cfg, lerr := config.Load(p.Path); lerr == nil && cfg.EngineV2() {
+				v2Members = append(v2Members, p.Name)
+			}
+		}
+		if len(v2Members) > 0 {
+			return fmt.Errorf("mcp-serve is not supported for workspace %q: member project(s) %v use engine: v2 and their v1 indexes are retired — serving them would return empty results silently. Use `grepai search-all`, or remove those projects from the workspace (ibreakshit/grepai#10)", wsName, v2Members)
+		}
+	}
+	return nil
+}
+
 func runMCPServe(cmd *cobra.Command, args []string) error {
 	workspaceFlag, _ := cmd.Flags().GetString("workspace")
 
@@ -157,6 +191,9 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 
 	projectRoot, wsName, err := resolveMCPTarget(explicitPath, workspaceFlag)
 	if err != nil {
+		return err
+	}
+	if err := rejectEngineV2ForMCP(projectRoot, wsName); err != nil {
 		return err
 	}
 

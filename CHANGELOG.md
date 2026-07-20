@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **mcp-serve engine gate**: `grepai mcp-serve` now refuses loudly to start for an engine:v2 project (or a workspace with an engine:v2 member) instead of silently serving empty results from the retired v1 store. Closes #8.
+
 - **Binary files (v2)**: Binary content (invalid UTF-8 or NUL byte, matching the v1 scanner heuristic) is recorded as an empty artifact instead of being sent to the embedding endpoint — previously raw image bytes could time out, dead-letter, and open the circuit breaker, stalling all indexing.
 - **Fingerprint rollover (v2)**: Changing the daemon's embedder/chunker rolls affected repos to a fresh generation atomically (view-clear + activation in one transaction, crash-idempotent) and forces a full reindex.
 - **Atomic reconcile plans (v2)**: A reconcile plan is enqueued in a single transaction on both the daemon and one-shot paths, so an interrupted reconcile can never strand a partially queued plan.
