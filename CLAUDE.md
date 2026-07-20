@@ -48,10 +48,43 @@ grepai is a semantic code search CLI tool that indexes code using vector embeddi
 
 ### CLI Commands (cli/)
 
-- `init` - Creates `.grepai/config.yaml` with default configuration
+- `init` - Creates `.grepai/config.yaml` with default configuration (`--engine v2` opts into the daemon)
 - `watch` - Starts daemon: full index + real-time file watcher
 - `search` - Queries the index with natural language
 - `agent-setup` - Configures Cursor/Claude Code integration
+- `daemon` - Controls the grepaid host daemon (`start|stop|status`, v2 engine)
+- `v2` - One-shot v2 tools (`index`, `search`, `migrate`, `parity`)
+
+## v2 Engine and the grepaid Daemon
+
+The repo contains a second, fork-specific engine under `internal/enginev2/`,
+served by a host daemon (`cmd/grepaid/`). Full operational doc:
+`docs/GREPAID_DAEMON.md`. Design record: `docs/superpowers/specs/` and
+`docs/GREPAI_V2_ARCHITECTURE_PLAN.md`.
+
+**Model:** one lazily-started daemon per host (flock singleton, Unix-socket
+JSON-RPC) serves every registered repo; each repo keeps its own SQLite catalog
+at `.grepai/catalog_v2.db` — search in one repo structurally cannot return
+another repo's code. Host settings (embedder, scheduler, socket) live in
+`~/.local/state/grepai/daemon.json`, not per-repo config.
+
+**Engine selection:** `engine: v2` in `.grepai/config.yaml` routes the
+top-level `search`/`watch`/`status` to the daemon and makes v1 inert for that
+repo; a broken v2 path fails loudly (no silent v1 fallback). Default (unset or
+`v1`) keeps classic behavior — the daemon is never contacted.
+
+**v2 packages** (`internal/enginev2/`): `core` (identity, fingerprint, job
+state machine), `catalog/sqlite` (durable catalog, WAL), `reconcile` (git
+truth -> desired jobs), `artifacts`/`worker` (build + durable drain; binary
+files become empty artifacts), `scheduler` (host-wide pacing, circuit
+breaker), `service` (transport-independent API), `rpc` (socket transport),
+`catalogset` (multi-repo fan-out), `daemoncfg`/`daemonctl` (host paths,
+lazy-start), `runtime` (one-shot wiring), `legacyimport` (v1 migration).
+
+**Invariants to preserve when editing v2** (spec §3): unchanged repo +
+fingerprint ⇒ zero embedding requests (idle=idle); one host, one scheduler;
+per-worktree isolation; atomic visibility (plans enqueue atomically, commits
+guard the active generation); query paths never enqueue work.
 
 ### Configuration
 

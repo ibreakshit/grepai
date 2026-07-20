@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **v2 Engine (fork)**: New indexing engine under `internal/enginev2/` — durable SQLite catalog (WAL), git-truth reconciliation, content+fingerprint-addressed artifact/vector cache, host-wide scheduler with circuit breaker, transport-independent service API. One-shot tools: `grepai v2 index|search|migrate|parity`.
+- **grepaid Host Daemon (fork)**: Single lazily-started daemon per host (flock singleton, Unix-socket JSON-RPC) serving every registered repository; each repo keeps its own isolated `.grepai/catalog_v2.db` (search in one repo structurally cannot return another repo's code). Host config in `~/.local/state/grepai/daemon.json`; control via `grepai daemon start|stop|status`. See `docs/GREPAID_DAEMON.md`.
+- **`engine: v2` gating**: Setting `engine: v2` in `.grepai/config.yaml` (or `grepai init --engine v2`) routes top-level `search`/`watch`/`status` through the daemon and makes v1 inert for that repo, with loud failures (no silent v1 fallback) and a gentle warning while a redundant v1 watcher is still running.
+- **Embedding batch size**: Configurable `embedder.batch_size` for slow endpoints.
+
+### Fixed
+
+- **Binary files (v2)**: Binary content (invalid UTF-8 or NUL byte, matching the v1 scanner heuristic) is recorded as an empty artifact instead of being sent to the embedding endpoint — previously raw image bytes could time out, dead-letter, and open the circuit breaker, stalling all indexing.
+- **Fingerprint rollover (v2)**: Changing the daemon's embedder/chunker rolls affected repos to a fresh generation atomically (view-clear + activation in one transaction, crash-idempotent) and forces a full reindex.
+- **Atomic reconcile plans (v2)**: A reconcile plan is enqueued in a single transaction on both the daemon and one-shot paths, so an interrupted reconcile can never strand a partially queued plan.
+
 ## [0.35.0] - 2026-03-16
 
 ### Added
