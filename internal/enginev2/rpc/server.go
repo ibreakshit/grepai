@@ -60,14 +60,20 @@ func Serve(ctx context.Context, l net.Listener, h service.Service) error {
 		go func() {
 			defer wg.Done()
 			defer conns.Delete(conn)
-			_ = handleConn(ctx, conn, h)
+			// Handlers run under sctx (not the parent ctx): when Serve winds
+			// down for ANY reason — parent cancellation OR an unexpected Accept
+			// failure — in-flight service calls see a canceled context and
+			// unwind, so the wg.Wait below cannot deadlock behind a call whose
+			// parent context is still live. (Service implementations must honor
+			// ctx cancellation; all engine calls — sqlite, embedder HTTP,
+			// WaitFresh polling — do.)
+			_ = handleConn(sctx, conn, h)
 		}()
 	}
 	// Wait for every handler before returning: the caller tears down shared
 	// state (catalogs) right after Serve/scheduler finish, so no handler —
 	// including a mutating Register/Reconcile — may still be running. The
-	// connections are closed by the sweep above, which unblocks their reads;
-	// in-flight service calls see the canceled ctx.
+	// connections are closed by the sweep above, which unblocks their reads.
 	scancel()
 	wg.Wait()
 	return retErr

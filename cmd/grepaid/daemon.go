@@ -295,28 +295,28 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 		return resp, err
 	}
 
-	// Unified needs-reconcile predicate: an empty view with nothing pending
-	// means this worktree is unindexed — whether because it is brand new, a
-	// fingerprint roll just cleared it, a prior initial reconcile failed and is
-	// being retried, or the catalog file was recreated after deletion. This is a
-	// durable state check, not a fragile registered-before flag, so every one of
-	// those paths converges on "reconcile now, loudly". (Invariant 3 intact:
-	// Register is a mutation path; queries still never enqueue.)
+	// Unified needs-reconcile predicate: an EMPTY VIEW means this worktree is
+	// unindexed — brand new, cleared by a fingerprint roll, a recreated catalog,
+	// or a PARTIALLY-enqueued prior reconcile that failed midway (plan jobs are
+	// enqueued one tx at a time, so pending>0 does NOT prove the plan is
+	// complete). Reconcile is idempotent (UpsertJob re-asserts the same desired
+	// intents), so re-running with jobs already pending is harmless and makes
+	// every retry converge on the FULL plan. This is a durable state check, not
+	// a fragile registered-before flag. (Invariant 3 intact: Register is a
+	// mutation path; queries still never enqueue.)
 	indexed, err := s.set.WorktreeIndexedHashes(ctx, resp.WorktreeID)
 	if err != nil {
 		return resp, err
 	}
-	pending, err := s.set.WorktreePendingCount(ctx, resp.WorktreeID)
-	if err != nil {
-		return resp, err
-	}
-	if len(indexed) == 0 && pending == 0 {
+	reconciled := -1
+	if len(indexed) == 0 {
 		rresp, rerr := s.Reconcile(ctx, service.ReconcileRequest{WorktreeID: resp.WorktreeID})
 		if rerr != nil {
 			// Fail Register loudly BEFORE the registry upsert: a retry sees the
 			// same empty-view state and reconciles again — no false fresh-empty.
 			return resp, fmt.Errorf("registered %s but its initial reconcile failed: %w", repo, rerr)
 		}
+		reconciled = rresp.JobsQueued
 		s.lg.Printf("registered %s: initial reconcile queued %d jobs", repo, rresp.JobsQueued)
 	}
 
@@ -331,6 +331,11 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 		ActiveGeneration: int64(active),
 	}); err != nil {
 		s.lg.Printf("registry update for %s failed: %v", repo, err)
+	}
+	// A first-ever registration's reconcile ran before its registry entry
+	// existed (touchReconcile was a no-op then) — stamp the cursor now.
+	if reconciled >= 0 {
+		s.reg.touchReconcile(string(repo), reconciled, time.Now())
 	}
 	return resp, nil
 }

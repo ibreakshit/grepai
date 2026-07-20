@@ -48,8 +48,8 @@ func EnsureDaemon(ctx context.Context, socket, binPath string, timeout time.Dura
 
 // spawnDetached starts grepaid in its own session so it outlives this process.
 // The socket the CLIENT is about to poll is passed explicitly via GREPAID_SOCKET
-// so the daemon binds the exact same path — a per-repo daemon.socket override
-// would otherwise apply only client-side and the two would never meet.
+// so the daemon binds the exact same path regardless of how each side resolved
+// its default — both ends agree by construction.
 func spawnDetached(binPath, socket string) error {
 	cmd := exec.Command(binPath) // #nosec G204 - fixed daemon binary path resolved by the caller
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
