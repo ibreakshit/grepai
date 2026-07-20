@@ -156,3 +156,64 @@ func TestResolveMCPWorkspace(t *testing.T) {
 		}
 	})
 }
+
+func writeEngineRepo(t *testing.T, engine string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Engine = engine
+	if err := cfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestMCPGateRejectsEngineV2Project(t *testing.T) {
+	dir := writeEngineRepo(t, "v2")
+	err := rejectEngineV2ForMCP(dir, "")
+	if err == nil {
+		t.Fatal("engine:v2 project must be rejected loudly — mcp-serve reads the retired v1 store")
+	}
+	if !strings.Contains(err.Error(), "engine: v2") {
+		t.Fatalf("error should explain the engine gate, got: %v", err)
+	}
+}
+
+func TestMCPGateAllowsV1Project(t *testing.T) {
+	for _, engine := range []string{"", "v1"} {
+		dir := writeEngineRepo(t, engine)
+		if err := rejectEngineV2ForMCP(dir, ""); err != nil {
+			t.Fatalf("engine %q must pass the gate, got: %v", engine, err)
+		}
+	}
+}
+
+func TestMCPGateRejectsWorkspaceWithV2Member(t *testing.T) {
+	v2dir := writeEngineRepo(t, "v2")
+	v1dir := writeEngineRepo(t, "v1")
+	tmpHome, _ := os.MkdirTemp("", "grepai-mcp-gate")
+	defer os.RemoveAll(tmpHome)
+	cleanup := setTestHomeDirCLI(t, tmpHome)
+	defer cleanup()
+
+	cfg := config.DefaultWorkspaceConfig()
+	cfg.AddWorkspace(config.Workspace{
+		Name:     "mixed",
+		Store:    config.StoreConfig{Backend: "gob"},
+		Embedder: config.EmbedderConfig{Provider: "ollama", Model: "m"},
+		Projects: []config.ProjectEntry{
+			{Name: "clean", Path: v1dir},
+			{Name: "modern", Path: v2dir},
+		},
+	})
+	if err := config.SaveWorkspaceConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	err := rejectEngineV2ForMCP("", "mixed")
+	if err == nil {
+		t.Fatal("workspace containing an engine:v2 member must be rejected")
+	}
+	if !strings.Contains(err.Error(), "modern") {
+		t.Fatalf("error should name the v2 member, got: %v", err)
+	}
+}

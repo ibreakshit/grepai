@@ -148,6 +148,8 @@ v1 inert.
   `watch` run (it still appears in `grepai status` and the daemon log).
   `watch` always exits 0 once the index is fresh; failed files are reported as a
   warning, not an exit code.
-- **Trace/symbols, RPG refresh, and generation-scoped controlled rebuild** are
-  not served by the daemon yet.
+- **Trace/symbols, RPG refresh, MCP, and generation-scoped controlled rebuild**
+  are not served by the daemon yet; `grepai mcp-serve` refuses to start (loudly)
+  for an engine:v2 repo or a workspace containing one, since the v1 store it
+  reads is retired there.
 - **Linux only** for the daemon process paths (flock + detached spawn).
