@@ -31,8 +31,8 @@ type fsBackend struct {
 	done   chan struct{}
 }
 
-// newFSBackend is the BackendFactory for production use.
-func newFSBackend(root string) (Backend, error) {
+// NewFSBackend is the BackendFactory for production use.
+func NewFSBackend(root string) (Backend, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -53,6 +53,8 @@ func newFSBackend(root string) (Backend, error) {
 		done:   make(chan struct{}),
 	}, nil
 }
+
+var _ BackendFactory = NewFSBackend
 
 var _ Backend = (*fsBackend)(nil)
 

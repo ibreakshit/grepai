@@ -23,7 +23,7 @@ func fsHarness(t *testing.T, prepare func(root string)) (string, Backend) {
 	if prepare != nil {
 		prepare(root)
 	}
-	b, err := newFSBackend(root)
+	b, err := NewFSBackend(root)
 	if err != nil {
 		t.Fatalf("newFSBackend: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestFSBackendRootGone(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(sub, "src"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	b, err := newFSBackend(sub)
+	b, err := NewFSBackend(sub)
 	if err != nil {
 		t.Fatal(err)
 	}

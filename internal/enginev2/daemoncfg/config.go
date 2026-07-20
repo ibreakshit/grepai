@@ -18,6 +18,7 @@ type Config struct {
 	Chunking    ChunkingConfig   `json:"chunking"`
 	SearchLimit int              `json:"search_limit,omitempty"`
 	Scheduler   *SchedulerConfig `json:"scheduler,omitempty"`
+	Watch       WatchConfig      `json:"watch,omitempty"`
 }
 
 // EmbedderConfig mirrors the fields config.EmbedderConfig needs to build the
@@ -43,6 +44,21 @@ type SchedulerConfig struct {
 	MaxIndexInflight      int `json:"max_index_inflight,omitempty"`
 	ReservedQueryInflight int `json:"reserved_query_inflight,omitempty"`
 	MaxJobAttempts        int `json:"max_job_attempts,omitempty"`
+}
+
+// WatchConfig tunes the continuous file watcher. Zero fields take the watch
+// package defaults; Enabled nil means enabled.
+type WatchConfig struct {
+	Enabled          *bool `json:"enabled,omitempty"`
+	QuietMS          int   `json:"quiet_ms,omitempty"`
+	MaxLatencyMS     int   `json:"max_latency_ms,omitempty"`
+	PollMinutes      int   `json:"poll_minutes,omitempty"`
+	SafetyNetMinutes int   `json:"safety_net_minutes,omitempty"`
+}
+
+// WatchEnabled reports whether continuous watching is on (default true).
+func (c *Config) WatchEnabled() bool {
+	return c.Watch.Enabled == nil || *c.Watch.Enabled
 }
 
 // Default returns the standing local defaults (the current 4B embedder on the

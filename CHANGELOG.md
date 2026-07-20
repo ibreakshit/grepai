@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Continuous watching (v2 daemon)**: grepaid now watches every registered repo (fsnotify/inotify) and auto-reconciles on file changes — debounced (1 s quiet / 10 s max-latency), live-priority jobs, gitignore-aware watch table, hourly safety net, graceful poll-fallback on watch-descriptor exhaustion. Freshness no longer requires `grepai watch`.
+
 - **v2 Engine (fork)**: New indexing engine under `internal/enginev2/` — durable SQLite catalog (WAL), git-truth reconciliation, content+fingerprint-addressed artifact/vector cache, host-wide scheduler with circuit breaker, transport-independent service API. One-shot tools: `grepai v2 index|search|migrate|parity`.
 - **grepaid Host Daemon (fork)**: Single lazily-started daemon per host (flock singleton, Unix-socket JSON-RPC) serving every registered repository; each repo keeps its own isolated `.grepai/catalog_v2.db` (search in one repo structurally cannot return another repo's code). Host config in `~/.local/state/grepai/daemon.json`; control via `grepai daemon start|stop|status`. See `docs/GREPAID_DAEMON.md`.
 - **`engine: v2` gating**: Setting `engine: v2` in `.grepai/config.yaml` (or `grepai init --engine v2`) routes top-level `search`/`watch`/`status` through the daemon and makes v1 inert for that repo, with loud failures (no silent v1 fallback) and a gentle warning while a redundant v1 watcher is still running.

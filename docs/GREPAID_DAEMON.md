@@ -125,9 +125,14 @@ v1 inert.
 
 ## Current limitations (this release)
 
-- **No continuous file-watching yet.** Freshness is reconcile-on-command
-  (`grepai watch` / `grepai init`), not driven by live filesystem events. The
-  fsnotify wiring is a later slice.
+- **Continuous watching is best-effort by design (hints, not guarantees).** The daemon watches every
+  registered repo (inotify via fsnotify): file events mark a repo dirty and a
+  debounced, live-priority reconcile follows (quiet window 1 s, max-latency
+  10 s by default; `watch` block in `daemon.json` tunes it). Events are hints —
+  content hashing decides whether anything really changed, an hourly safety-net
+  reconcile repairs anything missed, and a repo that exhausts inotify watch
+  descriptors degrades to 5-minute polling. Ignored trees (`.gitignore`
+  hierarchy) plus `.git/` and `.grepai/` are never watched.
 - **Host-global embedder only.** Every repository is indexed with the
   `daemon.json` embedder; honoring each repository's own embedder config is a
   planned refinement.
