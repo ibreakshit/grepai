@@ -32,10 +32,11 @@ var (
 // Set is the live map of registered repositories to their open catalogs, plus
 // the worktree->repo routing map. Safe for concurrent use.
 type Set struct {
-	mu    sync.RWMutex
-	cats  map[core.RepositoryID]*sqlite.Catalog
-	wtToR map[core.WorktreeID]core.RepositoryID
-	onErr func(repo core.RepositoryID, err error)
+	mu     sync.RWMutex
+	cats   map[core.RepositoryID]*sqlite.Catalog
+	wtToR  map[core.WorktreeID]core.RepositoryID
+	onErr  func(repo core.RepositoryID, err error)
+	closed bool
 }
 
 // New returns an empty Set.
@@ -78,6 +79,10 @@ func (s *Set) Add(ctx context.Context, repo core.RepositoryID, catalogPath strin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		_ = cat.Close()
+		return errors.New("catalogset: closed")
+	}
 	if _, ok := s.cats[repo]; ok {
 		_ = cat.Close() // already registered; keep the first handle, drop this one
 		return nil
@@ -86,10 +91,14 @@ func (s *Set) Add(ctx context.Context, repo core.RepositoryID, catalogPath strin
 	return nil
 }
 
-// Close closes every catalog. The first error is returned; all are attempted.
+// Close closes every catalog and marks the set closed: a straggler Register
+// arriving during shutdown gets an error instead of opening (and leaking) a
+// fresh catalog handle after teardown. The first error is returned; all are
+// attempted.
 func (s *Set) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	var first error
 	for repo, c := range s.cats {
 		if err := c.Close(); err != nil && first == nil {

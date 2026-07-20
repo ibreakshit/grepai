@@ -12,6 +12,7 @@ import (
 	"github.com/yoanbernabeu/grepai/daemon"
 	"github.com/yoanbernabeu/grepai/git"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
+	"github.com/yoanbernabeu/grepai/search"
 )
 
 // repoEngineV2 loads the current repo's config and reports whether it is
@@ -78,11 +79,24 @@ func runSearchDaemon(cmd *cobra.Command, args []string, cfg *config.Config) erro
 	if err != nil {
 		return err
 	}
+	// Normalize --path exactly as v1 does (absolute paths become root-relative
+	// prefixes); the daemon matches against repo-relative paths.
+	pathPrefix := ""
+	if searchPath != "" {
+		root, rerr := config.FindProjectRoot()
+		if rerr != nil {
+			return rerr
+		}
+		pathPrefix, err = search.NormalizeProjectPathPrefix(searchPath, root)
+		if err != nil {
+			return fmt.Errorf("invalid --path value: %w", err)
+		}
+	}
 	resp, err := client.Search(ctx, service.SearchRequest{
 		WorktreeID: wt,
 		Query:      strings.Join(args, " "),
 		Limit:      searchLimit,
-		PathPrefix: searchPath,
+		PathPrefix: pathPrefix,
 	})
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
@@ -164,10 +178,12 @@ func runWatchDaemon(cmd *cobra.Command, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	// Dead-letter baseline is captured BEFORE reconcile so a fast permanent
-	// failure right after enqueue is still attributed to this run. (The count is
-	// host-wide this release, so failures in another repo during the wait can be
-	// over-attributed — a scoped count is a documented follow-up.)
+	// Dead-letter baseline is captured BEFORE the explicit reconcile so a fast
+	// permanent failure right after enqueue is still attributed to this run.
+	// Known imprecision (documented in GREPAID_DAEMON.md): the count is
+	// host-wide, and on a FIRST registration the register call above already
+	// auto-reconciled — a failure in that window lands before this baseline. A
+	// worktree-scoped dead-letter count is the follow-up that fixes both.
 	dlStart := 0
 	if st, serr := client.Status(ctx, service.StatusRequest{WorktreeID: wt}); serr == nil {
 		dlStart = st.DeadLetters

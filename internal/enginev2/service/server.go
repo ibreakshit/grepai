@@ -110,17 +110,23 @@ func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 	if err := validateQueryVector(q, s.emb.Dimensions()); err != nil {
 		return SearchResponse{}, err
 	}
+	const maxFetch = 2000
 	limit := req.Limit
 	if limit <= 0 {
 		limit = s.limit
 	}
+	if limit > maxFetch {
+		limit = maxFetch // also bounds a hostile/huge -n
+	}
 	fetch := limit
 	if req.PathPrefix != "" {
-		// Over-fetch so post-filtering can still fill the limit; bounded to keep
-		// a hostile prefix from forcing an unbounded scan.
-		fetch = limit * 20
-		if fetch > 2000 {
-			fetch = 2000
+		// Over-fetch so post-filtering can still fill the limit; bounded (and
+		// computed overflow-safely) so a large limit cannot wrap or force an
+		// unbounded scan.
+		if limit >= maxFetch/20 {
+			fetch = maxFetch
+		} else {
+			fetch = limit * 20
 		}
 	}
 	hits, err := s.cat.SearchWorktree(ctx, req.WorktreeID, q, fetch)

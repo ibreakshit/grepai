@@ -7,13 +7,29 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
 )
 
 // Serve accepts connections on l and serves the JSON-RPC surface backed by h,
-// one goroutine per connection. It returns nil when l is closed.
-func Serve(l net.Listener, h service.Service) error {
+// one goroutine per connection. Handlers run under ctx, so canceling it aborts
+// in-flight service calls; cancellation also closes the listener and every open
+// connection (unblocking their reads) — no handler goroutine outlives shutdown
+// to mutate state after the caller has torn it down. Returns nil when stopped
+// by ctx/listener close.
+func Serve(ctx context.Context, l net.Listener, h service.Service) error {
+	var conns sync.Map // net.Conn -> struct{}
+	go func() {
+		<-ctx.Done()
+		_ = l.Close()
+		conns.Range(func(k, _ any) bool {
+			if c, ok := k.(net.Conn); ok {
+				_ = c.Close()
+			}
+			return true
+		})
+	}()
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -22,7 +38,11 @@ func Serve(l net.Listener, h service.Service) error {
 			}
 			return err
 		}
-		go func() { _ = handleConn(context.Background(), conn, h) }()
+		conns.Store(conn, struct{}{})
+		go func() {
+			defer conns.Delete(conn)
+			_ = handleConn(ctx, conn, h)
+		}()
 	}
 }
 

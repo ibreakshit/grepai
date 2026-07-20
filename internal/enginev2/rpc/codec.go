@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -11,10 +12,6 @@ import (
 // maxFrameBytes bounds a single message so a malformed/hostile Content-Length
 // cannot force an unbounded allocation.
 const maxFrameBytes = 64 << 20 // 64 MiB
-
-// maxHeaderLine bounds a single header line so an endless unterminated header
-// cannot buffer unbounded memory.
-const maxHeaderLine = 4 << 10 // 4 KiB
 
 // writeFrame writes payload with an LSP-style Content-Length header.
 func writeFrame(w io.Writer, payload []byte) error {
@@ -27,20 +24,24 @@ func writeFrame(w io.Writer, payload []byte) error {
 
 // readFrame reads one Content-Length-framed message. A clean close before any
 // header byte returns io.EOF. Headers other than Content-Length are ignored.
+// Header lines are read with ReadSlice, whose buffer (bufio default 4 KiB)
+// genuinely bounds memory: an unterminated header fails with ErrBufferFull
+// instead of buffering attacker-controlled bytes without limit.
 func readFrame(r *bufio.Reader) ([]byte, error) {
 	n := -1
 	first := true
 	for {
-		line, err := r.ReadString('\n')
+		lineBytes, err := r.ReadSlice('\n')
 		if err != nil {
-			if err == io.EOF && first && line == "" {
+			if errors.Is(err, bufio.ErrBufferFull) {
+				return nil, fmt.Errorf("rpc: header line too long (no newline within %d bytes)", r.Size())
+			}
+			if err == io.EOF && first && len(lineBytes) == 0 {
 				return nil, io.EOF
 			}
 			return nil, err
 		}
-		if len(line) > maxHeaderLine {
-			return nil, fmt.Errorf("rpc: header line too long (%d bytes)", len(line))
-		}
+		line := string(lineBytes)
 		first = false
 		trimmed := strings.TrimRight(line, "\r\n")
 		if trimmed == "" { // blank line ends the headers

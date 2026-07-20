@@ -65,19 +65,25 @@ func ReadPID(lockPath string) int {
 // it to exit, detected by the lock becoming free. It is a no-op if no daemon is
 // running (the lock is already free).
 func StopDaemon(lockPath string, timeout time.Duration) error {
-	// If we can take the lock, nothing is running.
-	if l, err := Acquire(lockPath); err == nil {
+	// Only a HELD lock means a daemon is running; any other Acquire failure
+	// (permissions, IO) is its own error, not evidence of a live daemon.
+	l, err := Acquire(lockPath)
+	if err == nil {
 		return l.Release()
+	}
+	if !errors.Is(err, ErrAlreadyRunning) {
+		return err
 	}
 	pid := ReadPID(lockPath)
 	if pid <= 0 {
 		return errors.New("grepaid: running but pid unknown")
 	}
-	// Guard against pid reuse: only signal a process that actually looks like
-	// grepaid (Linux: /proc/<pid>/comm). If comm is unreadable, proceed — the
-	// flock being held is strong evidence the pid is live and ours.
-	if comm, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm"); err == nil { // #nosec G304 - fixed /proc path
-		if !strings.Contains(strings.TrimSpace(string(comm)), "grepaid") {
+	// Guard against pid reuse: only signal a process whose comm IS grepaid
+	// (exact match; comm is the basename, kernel-truncated to 15 chars — which
+	// still holds all of "grepaid"). If comm is unreadable (non-Linux /proc),
+	// proceed — the held flock is strong evidence the pid is live and ours.
+	if comm, cerr := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm"); cerr == nil { // #nosec G304 - fixed /proc path
+		if strings.TrimSpace(string(comm)) != "grepaid" {
 			return errors.New("grepaid: lock-file pid " + strconv.Itoa(pid) + " is not a grepaid process (pid reuse?); not signaling")
 		}
 	}

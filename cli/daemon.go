@@ -54,7 +54,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("grepaid running (pid %d) on %s\n", daemonctl.ReadPID(paths.Lock), paths.Socket)
+	socket, err := daemonSocket(nil)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("grepaid running (pid %d) on %s\n", daemonctl.ReadPID(paths.Lock), socket)
 	return nil
 }
 
@@ -75,7 +79,11 @@ func runDaemonStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	client, err := rpc.Dial(paths.Socket)
+	socket, err := daemonSocket(nil)
+	if err != nil {
+		return err
+	}
+	client, err := rpc.Dial(socket)
 	if err != nil {
 		if errors.Is(err, rpc.ErrDaemonDown) {
 			fmt.Println("grepaid: not running")
@@ -90,7 +98,7 @@ func runDaemonStatus(_ *cobra.Command, _ []string) error {
 		repos = len(reg.Entries)
 	}
 	fmt.Printf("grepaid: running (pid %d)\n", daemonctl.ReadPID(paths.Lock))
-	fmt.Printf("  socket:   %s\n", paths.Socket)
+	fmt.Printf("  socket:   %s\n", socket)
 	fmt.Printf("  registry: %s (%d repos)\n", paths.Registry, repos)
 	return nil
 }

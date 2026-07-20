@@ -54,12 +54,23 @@ func (s *Set) EnsureActiveGeneration(ctx context.Context, repo core.RepositoryID
 	return c.EnsureActiveGeneration(ctx, repo, gen, fingerprint)
 }
 
+// ClaimNextJobInRepo follows the quarantine-lite contract: a member whose claim
+// fails is reported via OnAggregateError and answers "no job" instead of
+// erroring — the scheduler's round-robin pass aborts on a claim error, so a
+// fail-fast here would let one broken catalog stall every healthy repo. The
+// skipped repo's jobs stay durably queued and are retried on later passes.
+// An UNREGISTERED repo still errors (that is a routing bug, not a bad catalog).
 func (s *Set) ClaimNextJobInRepo(ctx context.Context, repo core.RepositoryID, minPriority core.Priority) (core.Job, bool, error) {
 	c, err := s.get(repo)
 	if err != nil {
 		return core.Job{}, false, err
 	}
-	return c.ClaimNextJobInRepo(ctx, repo, minPriority)
+	job, ok, err := c.ClaimNextJobInRepo(ctx, repo, minPriority)
+	if err != nil {
+		s.reportErr(repo, err)
+		return core.Job{}, false, nil
+	}
+	return job, ok, nil
 }
 
 func (s *Set) PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error {
