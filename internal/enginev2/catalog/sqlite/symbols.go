@@ -6,17 +6,9 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
 
-// MissingSymbolArtifact identifies one active-view file whose artifact has not
-// had symbols extracted yet (the backfill work list).
-type MissingSymbolArtifact struct {
-	Path       string
-	ArtifactID core.ArtifactID
-	SourceHash string
-}
-
 // ArtifactsMissingSymbols lists active-view artifacts with symbols_version=0
 // for a worktree, sorted by path (deterministic backfill order).
-func (c *Catalog) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) ([]MissingSymbolArtifact, error) {
+func (c *Catalog) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) ([]core.MissingSymbolArtifact, error) {
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT wf.relative_path, fa.artifact_id, fa.source_hash
 		FROM worktree_files wf
@@ -27,9 +19,9 @@ func (c *Catalog) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeI
 		return nil, err
 	}
 	defer rows.Close()
-	var out []MissingSymbolArtifact
+	var out []core.MissingSymbolArtifact
 	for rows.Next() {
-		var m MissingSymbolArtifact
+		var m core.MissingSymbolArtifact
 		var id string
 		if err := rows.Scan(&m.Path, &id, &m.SourceHash); err != nil {
 			return nil, err
@@ -40,20 +32,10 @@ func (c *Catalog) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeI
 	return out, rows.Err()
 }
 
-// SymbolAt is one symbol definition resolved through a worktree's active view.
-type SymbolAt struct {
-	Path      string
-	Name      string
-	Kind      string
-	Line      int
-	EndLine   int
-	Signature string
-}
-
 // SymbolDefinitions returns definitions of name within the worktree's ACTIVE
 // view — the view join is what provides worktree isolation and generation
 // scoping (a retired generation's artifacts are unreachable).
-func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name string) ([]SymbolAt, error) {
+func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name string) ([]core.SymbolAt, error) {
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT wf.relative_path, s.name, s.kind, s.line, s.end_line, s.signature
 		FROM worktree_files wf
@@ -64,9 +46,9 @@ func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, nam
 		return nil, err
 	}
 	defer rows.Close()
-	var out []SymbolAt
+	var out []core.SymbolAt
 	for rows.Next() {
-		var s SymbolAt
+		var s core.SymbolAt
 		if err := rows.Scan(&s.Path, &s.Name, &s.Kind, &s.Line, &s.EndLine, &s.Signature); err != nil {
 			return nil, err
 		}
@@ -75,18 +57,10 @@ func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, nam
 	return out, rows.Err()
 }
 
-// EdgeAt is one call edge resolved through a worktree's active view.
-type EdgeAt struct {
-	Caller string
-	Callee string
-	Path   string
-	Line   int
-}
-
 // SymbolEdges returns call edges touching name within the worktree's active
 // view. callersOf=true returns edges WHERE callee=name (who calls it);
 // callersOf=false returns edges WHERE caller=name (what it calls).
-func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]EdgeAt, error) {
+func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error) {
 	where := "e.callee=?"
 	if !callersOf {
 		where = "e.caller=?"
@@ -101,9 +75,9 @@ func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name stri
 		return nil, err
 	}
 	defer rows.Close()
-	var out []EdgeAt
+	var out []core.EdgeAt
 	for rows.Next() {
-		var e EdgeAt
+		var e core.EdgeAt
 		if err := rows.Scan(&e.Caller, &e.Callee, &e.Path, &e.Line); err != nil {
 			return nil, err
 		}

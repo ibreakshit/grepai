@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/enginetest"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/rpc"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
+	_ "modernc.org/sqlite"
 )
 
 // testConfig returns a daemon config whose embedder fields are cosmetic (the
@@ -446,5 +448,115 @@ func TestSearchAllAcrossRepos(t *testing.T) {
 		if h.Path == "beta.go" {
 			t.Fatal("ISOLATION BREACH: single-repo search returned another repo's file")
 		}
+	}
+}
+
+// traceFixture writes a Go call chain the regex extractor understands.
+func traceFixture(fx *enginetest.GitFixture) {
+	fx.WriteFile("handler.go", "package m\n\nfunc HandleReq(x int) {\n\tif Validate(x) {\n\t\trecordMetric(x)\n\t}\n}\n")
+	fx.WriteFile("validate.go", "package m\n\nfunc Validate(x int) bool {\n\treturn x > 0\n}\n\nfunc recordMetric(x int) {}\n")
+	fx.Commit("trace fixture")
+}
+
+// TestTraceEndToEnd: real files, real (regex) extraction in the daemon build
+// path, trace served over RPC through the active view.
+func TestTraceEndToEnd(t *testing.T) {
+	p := setHostEnv(t)
+	fx := enginetest.NewGitFixture(t)
+	traceFixture(fx)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- runWithEmbedder(ctx, p, testConfig(), enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	defer func() { cancel(); <-done }()
+	c := dialWithRetry(t, p.Socket, 3*time.Second)
+	defer c.Close()
+	reg, err := c.Register(context.Background(), service.RegisterRequest{Root: fx.Root()})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	waitFresh(t, c, reg.WorktreeID, 5*time.Second)
+
+	resp, err := c.Trace(context.Background(), service.TraceRequest{WorktreeID: reg.WorktreeID, Symbol: "Validate", Direction: service.TraceCallers})
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	foundDef, foundCaller := false, false
+	for _, d := range resp.Definitions {
+		if d.Path == "validate.go" && d.Name == "Validate" {
+			foundDef = true
+		}
+	}
+	for _, e := range resp.Edges {
+		if e.Caller == "HandleReq" && e.Callee == "Validate" && e.Path == "handler.go" {
+			foundCaller = true
+		}
+	}
+	if !foundDef || !foundCaller {
+		t.Fatalf("trace incomplete: defs=%+v edges=%+v", resp.Definitions, resp.Edges)
+	}
+	if resp.BackfillPending != 0 {
+		t.Fatalf("fresh daemon-built index should have no backfill pending, got %d", resp.BackfillPending)
+	}
+}
+
+// TestSymbolBackfillOnRestart simulates the real fleet upgrade: artifacts exist
+// WITHOUT symbols (as committed by a pre-trace binary), and a daemon restart
+// backfills them without re-embedding anything.
+func TestSymbolBackfillOnRestart(t *testing.T) {
+	p := setHostEnv(t)
+	fx := enginetest.NewGitFixture(t)
+	traceFixture(fx)
+
+	// Run 1: index normally (symbols get extracted).
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() { done1 <- runWithEmbedder(ctx1, p, testConfig(), enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	c1 := dialWithRetry(t, p.Socket, 3*time.Second)
+	reg, err := c1.Register(context.Background(), service.RegisterRequest{Root: fx.Root()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFresh(t, c1, reg.WorktreeID, 5*time.Second)
+	c1.Close()
+	cancel1()
+	<-done1
+
+	// Strip symbols to simulate a catalog written by a pre-trace binary.
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(fx.Root(), ".grepai", "catalog_v2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{"DELETE FROM symbols", "DELETE FROM symbol_edges", "UPDATE file_artifacts SET symbols_version=0"} {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	db.Close()
+
+	// Run 2: rehydrate triggers the backfill (CPU-only; FakeEmbedder counts
+	// stay untouched because nothing re-embeds).
+	emb2 := enginetest.NewFakeEmbedder(4)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() { done2 <- runWithEmbedder(ctx2, p, testConfig(), emb2, os.Stderr) }()
+	defer func() { cancel2(); <-done2 }()
+	c2 := dialWithRetry(t, p.Socket, 3*time.Second)
+	defer c2.Close()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp, terr := c2.Trace(context.Background(), service.TraceRequest{WorktreeID: reg.WorktreeID, Symbol: "Validate", Direction: service.TraceCallers})
+		if terr == nil && resp.BackfillPending == 0 && len(resp.Edges) > 0 {
+			break // backfilled and trace-able
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backfill never completed: %+v err=%v", resp, terr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if emb2.TextsEmbedded() != 0 {
+		t.Fatalf("backfill must not re-embed anything; embedded %d texts", emb2.TextsEmbedded())
 	}
 }

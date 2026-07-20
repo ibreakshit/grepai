@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
 	"github.com/yoanbernabeu/grepai/rpg"
 	gstats "github.com/yoanbernabeu/grepai/stats"
 	"github.com/yoanbernabeu/grepai/trace"
@@ -160,6 +161,14 @@ func init() {
 func runTraceCallers(cmd *cobra.Command, args []string) error {
 	symbolName := args[0]
 	ctx := context.Background()
+
+	// engine:v2 routes to the daemon (v1 symbol stores are retired there); a
+	// broken v2 fails loudly rather than silently reading a missing gob.
+	if _, v2, gerr := repoEngineV2(); gerr != nil {
+		return gerr
+	} else if v2 {
+		return runTraceDaemon(cmd, symbolName, service.TraceCallers, traceDepth, traceJSON)
+	}
 
 	if traceProject != "" && traceWorkspace == "" {
 		return fmt.Errorf("--project requires --workspace")
@@ -323,6 +332,14 @@ func runTraceCallees(cmd *cobra.Command, args []string) error {
 	symbolName := args[0]
 	ctx := context.Background()
 
+	// engine:v2 routes to the daemon (v1 symbol stores are retired there); a
+	// broken v2 fails loudly rather than silently reading a missing gob.
+	if _, v2, gerr := repoEngineV2(); gerr != nil {
+		return gerr
+	} else if v2 {
+		return runTraceDaemon(cmd, symbolName, service.TraceCallees, traceDepth, traceJSON)
+	}
+
 	if traceProject != "" && traceWorkspace == "" {
 		return fmt.Errorf("--project requires --workspace")
 	}
@@ -471,6 +488,14 @@ func runTraceCallees(cmd *cobra.Command, args []string) error {
 func runTraceGraph(cmd *cobra.Command, args []string) error {
 	symbolName := args[0]
 	ctx := context.Background()
+
+	// engine:v2 routes to the daemon (v1 symbol stores are retired there); a
+	// broken v2 fails loudly rather than silently reading a missing gob.
+	if _, v2, gerr := repoEngineV2(); gerr != nil {
+		return gerr
+	} else if v2 {
+		return runTraceDaemon(cmd, symbolName, service.TraceGraph, traceDepth, traceJSON)
+	}
 
 	if traceProject != "" && traceWorkspace == "" {
 		return fmt.Errorf("--project requires --workspace")

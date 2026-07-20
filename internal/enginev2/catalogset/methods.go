@@ -184,6 +184,44 @@ func (s *Set) WorktreeIndexedHashes(ctx context.Context, wt core.WorktreeID) (ma
 	return c.WorktreeIndexedHashes(ctx, wt)
 }
 
+// SymbolDefinitions resolves trace definitions through the worktree's view.
+func (s *Set) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name string) ([]core.SymbolAt, error) {
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return nil, err
+	}
+	return c.SymbolDefinitions(ctx, wt, name)
+}
+
+// SymbolEdges resolves trace call edges through the worktree's view.
+func (s *Set) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error) {
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return nil, err
+	}
+	return c.SymbolEdges(ctx, wt, name, callersOf)
+}
+
+// ArtifactsMissingSymbols lists the worktree's pending symbol backfill.
+func (s *Set) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) ([]core.MissingSymbolArtifact, error) {
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return nil, err
+	}
+	return c.ArtifactsMissingSymbols(ctx, wt)
+}
+
+// BackfillSymbols writes backfilled symbol data for an artifact in wt's repo
+// (beyond the strict interface union; the daemon's backfill uses it — the
+// worktree parameter exists solely to route to the owning catalog).
+func (s *Set) BackfillSymbols(ctx context.Context, wt core.WorktreeID, artifactID core.ArtifactID, defs []core.SymbolDef, edges []core.SymbolEdge) error {
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return err
+	}
+	return c.PutArtifactSymbols(ctx, artifactID, defs, edges)
+}
+
 // --- routed by job.WorktreeID ---
 
 func (s *Set) UpsertJob(ctx context.Context, job core.Job) error {

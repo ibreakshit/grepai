@@ -24,6 +24,7 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/runtime"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/scheduler"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/symbols"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/watch"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/worker"
 )
@@ -63,8 +64,14 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 
 	rec := reconcile.New(set)
 	inner := service.New(set, rec, emb, fp, cfg.SearchLimit)
+	extractor := symbols.New()
+	bf := &backfillRunner{
+		ctx: ctx, set: set, loader: runtime.NewDiskLoader(), x: extractor, lg: lg,
+		sem: make(chan struct{}, 1), active: map[core.WorktreeID]bool{},
+	}
 	regsvc := &registeringService{
 		Server:  inner,
+		bf:      bf,
 		set:     set,
 		br:      br,
 		emb:     emb,
@@ -120,6 +127,7 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 
 	sc := cfg.SchedulerConfigOrDefault()
 	wk := worker.New(set, br, runtime.NewDiskLoader(), worker.NoCrash, sc.MaxJobAttempts)
+	wk.SetSymbolExtractor(extractor)
 	if n, err := wk.Recover(ctx); err != nil {
 		lg.Printf("startup: worker recover failed: %v", err)
 	} else if n > 0 {
@@ -269,6 +277,7 @@ func (m *registryManager) touchReconcile(repoID string, pending int, at time.Tim
 type registeringService struct {
 	*service.Server
 	mu           sync.Mutex
+	bf           *backfillRunner
 	onRegistered func(root string, wt core.WorktreeID) // optional: watcher hookup
 	set          *catalogset.Set
 	br           *catalogset.BuilderRouter
@@ -358,6 +367,11 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 	}
 	if s.onRegistered != nil {
 		s.onRegistered(canonical, resp.WorktreeID)
+	}
+	// Symbol backfill for artifacts that predate extraction (CPU-only, no
+	// embedder; one repo at a time host-wide).
+	if s.bf != nil {
+		s.bf.maybeStart(resp.WorktreeID, repo, canonical)
 	}
 	return resp, nil
 }
@@ -462,4 +476,73 @@ func watchConfig(cfg *daemoncfg.Config) watch.Config {
 		out.SafetyNet = time.Duration(w.SafetyNetMinutes) * time.Minute
 	}
 	return out
+}
+
+// backfillRunner extracts symbols for artifacts committed before extraction
+// existed (symbols_version=0). CPU-only — no embedder, no scheduler. One repo
+// backfills at a time host-wide (sem); per-worktree runs are deduplicated.
+// Content is loaded through the hash-verified loader: a file changed since its
+// artifact was committed is SKIPPED (the watcher path will produce a fresh
+// artifact that extracts normally); a deleted file is skipped the same way.
+type backfillRunner struct {
+	ctx    context.Context
+	set    *catalogset.Set
+	loader worker.ContentLoader
+	x      *symbols.Extractor
+	lg     *log.Logger
+	sem    chan struct{}
+
+	mu     sync.Mutex
+	active map[core.WorktreeID]bool
+}
+
+func (b *backfillRunner) maybeStart(wt core.WorktreeID, repo core.RepositoryID, root string) {
+	missing, err := b.set.ArtifactsMissingSymbols(b.ctx, wt)
+	if err != nil || len(missing) == 0 {
+		return
+	}
+	b.mu.Lock()
+	if b.active[wt] {
+		b.mu.Unlock()
+		return
+	}
+	b.active[wt] = true
+	b.mu.Unlock()
+
+	go func() {
+		defer func() {
+			b.mu.Lock()
+			delete(b.active, wt)
+			b.mu.Unlock()
+		}()
+		select {
+		case b.sem <- struct{}{}:
+			defer func() { <-b.sem }()
+		case <-b.ctx.Done():
+			return
+		}
+		done, skipped := 0, 0
+		for _, m := range missing {
+			if b.ctx.Err() != nil {
+				return
+			}
+			content, lerr := b.loader.Load(b.ctx, repo, root, m.Path, m.SourceHash)
+			if lerr != nil {
+				skipped++ // changed or deleted since commit: the live path covers it
+				continue
+			}
+			defs, edges, xerr := b.x.Extract(b.ctx, m.Path, string(content))
+			if xerr != nil {
+				skipped++
+				continue
+			}
+			if perr := b.set.BackfillSymbols(b.ctx, wt, m.ArtifactID, defs, edges); perr != nil {
+				b.lg.Printf("symbol backfill %s: persist %s: %v", wt, m.Path, perr)
+				skipped++
+				continue
+			}
+			done++
+		}
+		b.lg.Printf("symbol backfill %s: %d extracted, %d skipped (of %d)", wt, done, skipped, len(missing))
+	}()
 }

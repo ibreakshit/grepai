@@ -11,6 +11,7 @@ import (
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/daemon"
 	"github.com/yoanbernabeu/grepai/git"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
 	"github.com/yoanbernabeu/grepai/search"
 )
@@ -219,4 +220,46 @@ func runWatchDaemon(cmd *cobra.Command) error {
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// runTraceDaemon serves a top-level `grepai trace <dir> <symbol>` against the
+// daemon (engine:v2). Loud failures, no v1 fallback.
+func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int, asJSON bool) error {
+	warnIfV1WatcherRunning(cmd)
+	ctx := context.Background()
+	client, err := ensureDaemonClient(ctx)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	wt, err := registerCwd(ctx, client)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Trace(ctx, service.TraceRequest{WorktreeID: wt, Symbol: symbol, Direction: direction, Depth: depth})
+	if err != nil {
+		return fmt.Errorf("trace: %w", err)
+	}
+	if resp.BackfillPending > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "note: symbol coverage still building (%d files pending backfill) — results may be incomplete\n", resp.BackfillPending)
+	}
+	if asJSON {
+		out := struct {
+			Symbol      string          `json:"symbol"`
+			Direction   string          `json:"direction"`
+			Definitions []core.SymbolAt `json:"definitions"`
+			Edges       []core.EdgeAt   `json:"edges"`
+		}{symbol, direction, resp.Definitions, resp.Edges}
+		return encodeJSON(cmd, out)
+	}
+	for _, d := range resp.Definitions {
+		fmt.Fprintf(cmd.OutOrStdout(), "def  %s:%d-%d  %s %s  %s\n", d.Path, d.Line, d.EndLine, d.Kind, d.Name, d.Signature)
+	}
+	for _, e := range resp.Edges {
+		fmt.Fprintf(cmd.OutOrStdout(), "call %s:%d  %s → %s\n", e.Path, e.Line, e.Caller, e.Callee)
+	}
+	if len(resp.Definitions) == 0 && len(resp.Edges) == 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "no symbols or edges found for %q\n", symbol)
+	}
+	return nil
 }

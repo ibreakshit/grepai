@@ -81,3 +81,29 @@ type SymbolEdge struct {
 	Callee string
 	Line   int
 }
+
+// SymbolAt is one symbol definition resolved through a worktree's active view.
+type SymbolAt struct {
+	Path      string
+	Name      string
+	Kind      string
+	Line      int
+	EndLine   int
+	Signature string
+}
+
+// EdgeAt is one call edge resolved through a worktree's active view.
+type EdgeAt struct {
+	Caller string
+	Callee string
+	Path   string
+	Line   int
+}
+
+// MissingSymbolArtifact identifies one active-view file whose artifact has not
+// had symbols extracted yet (the backfill work list).
+type MissingSymbolArtifact struct {
+	Path       string
+	ArtifactID ArtifactID
+	SourceHash string
+}

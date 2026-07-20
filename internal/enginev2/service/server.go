@@ -36,6 +36,12 @@ type Catalog interface {
 	UpsertJobs(ctx context.Context, jobs []core.Job) error
 	// Worktrees lists every registered worktree (cross-repo fan-out queries).
 	Worktrees(ctx context.Context) ([]core.WorktreeID, error)
+	// SymbolDefinitions/SymbolEdges resolve trace data through a worktree's
+	// ACTIVE view (isolation + generation scoping structural).
+	SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name string) ([]core.SymbolAt, error)
+	SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error)
+	// ArtifactsMissingSymbols sizes the symbol backfill still pending for wt.
+	ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) ([]core.MissingSymbolArtifact, error)
 }
 
 // Reconciler computes a worktree's convergence plan (satisfied by *reconcile.Engine).
@@ -244,10 +250,93 @@ func (s *Server) SearchAll(ctx context.Context, req SearchAllRequest) (SearchAll
 	return resp, nil
 }
 
-// Trace is inert this phase: symbol extraction is deferred, so it returns no
-// symbols. It contacts no backend and enqueues nothing.
-func (s *Server) Trace(_ context.Context, req TraceRequest) (TraceResponse, error) {
-	return TraceResponse{WorktreeID: req.WorktreeID, Symbols: nil}, nil
+// Trace answers callers/callees/graph queries from artifact-scoped symbol data
+// through the worktree's active view. Query-only: reads, never enqueues
+// (invariant 3); no embedding backend involved.
+func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, error) {
+	if req.Symbol == "" {
+		return TraceResponse{}, errors.New("trace: symbol required")
+	}
+	dir := req.Direction
+	if dir == "" {
+		dir = TraceCallers
+	}
+	resp := TraceResponse{WorktreeID: req.WorktreeID}
+	defs, err := s.cat.SymbolDefinitions(ctx, req.WorktreeID, req.Symbol)
+	if err != nil {
+		return TraceResponse{}, err
+	}
+	resp.Definitions = defs
+
+	switch dir {
+	case TraceCallers, TraceCallees:
+		edges, err := s.cat.SymbolEdges(ctx, req.WorktreeID, req.Symbol, dir == TraceCallers)
+		if err != nil {
+			return TraceResponse{}, err
+		}
+		resp.Edges = edges
+	case TraceGraph:
+		depth := req.Depth
+		if depth <= 0 {
+			depth = 2
+		}
+		if depth > 5 {
+			depth = 5
+		}
+		edges, err := s.traceGraph(ctx, req.WorktreeID, req.Symbol, depth)
+		if err != nil {
+			return TraceResponse{}, err
+		}
+		resp.Edges = edges
+	default:
+		return TraceResponse{}, fmt.Errorf("trace: unknown direction %q", dir)
+	}
+
+	if missing, err := s.cat.ArtifactsMissingSymbols(ctx, req.WorktreeID); err == nil {
+		resp.BackfillPending = len(missing)
+	}
+	return resp, nil
+}
+
+// traceGraph BFS-expands both directions from root up to depth levels,
+// deduplicating edges. Level-by-level catalog queries keep it simple; depth is
+// capped by the caller.
+func (s *Server) traceGraph(ctx context.Context, wt core.WorktreeID, root string, depth int) ([]core.EdgeAt, error) {
+	type ekey struct {
+		caller, callee, path string
+		line                 int
+	}
+	seenEdge := map[ekey]bool{}
+	visited := map[string]bool{root: true}
+	frontier := []string{root}
+	var out []core.EdgeAt
+	for level := 0; level < depth && len(frontier) > 0; level++ {
+		var next []string
+		for _, sym := range frontier {
+			for _, callersOf := range []bool{true, false} {
+				edges, err := s.cat.SymbolEdges(ctx, wt, sym, callersOf)
+				if err != nil {
+					return nil, err
+				}
+				for _, e := range edges {
+					k := ekey{e.Caller, e.Callee, e.Path, e.Line}
+					if seenEdge[k] {
+						continue
+					}
+					seenEdge[k] = true
+					out = append(out, e)
+					for _, n := range []string{e.Caller, e.Callee} {
+						if !visited[n] {
+							visited[n] = true
+							next = append(next, n)
+						}
+					}
+				}
+			}
+		}
+		frontier = next
+	}
+	return out, nil
 }
 
 // Status reports the worktree's active generation and freshness. Read-only.

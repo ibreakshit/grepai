@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`grepai search-all` (v2)**: cross-repo search over every daemon-registered repo/worktree — the query is embedded once, fanned out per worktree, merged and ranked by score (comparable under the host-global embedder), each hit tagged with its repo; failing catalogs are skipped and reported, stale repos noted. Per-repo isolation is untouched (explicit multi-repo output only). Closes #12.
 
+- **Trace under the v2 daemon**: `grepai trace callers|callees|graph` now works for engine:v2 repos — symbols and call edges are extracted in the daemon's build path (regex extractor; tree-sitter behind the `treesitter` build tag), stored artifact-scoped in the per-repo catalog (migration 0003), and served over RPC from the active view. Existing catalogs are backfilled on daemon start (CPU-only, one repo at a time, zero re-embedding); trace warns while coverage is still building. Closes #9.
+
 - **Continuous watching (v2 daemon)**: grepaid now watches every registered repo (fsnotify/inotify) and auto-reconciles on file changes — debounced (1 s quiet / 10 s max-latency), live-priority jobs, gitignore-aware watch table, hourly safety net, graceful poll-fallback on watch-descriptor exhaustion. Freshness no longer requires `grepai watch`.
 
 - **v2 Engine (fork)**: New indexing engine under `internal/enginev2/` — durable SQLite catalog (WAL), git-truth reconciliation, content+fingerprint-addressed artifact/vector cache, host-wide scheduler with circuit breaker, transport-independent service API. One-shot tools: `grepai v2 index|search|migrate|parity`.
