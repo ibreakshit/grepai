@@ -138,13 +138,15 @@ func (c *Catalog) SymbolDefinitionsBulk(ctx context.Context, wt core.WorktreeID,
 		for _, n := range batch {
 			args = append(args, n)
 		}
-		rows, err := c.db.QueryContext(ctx, `
+		//nolint:gosec // #nosec G202 - placeholders is "?,?..." built from Repeat; all values are bound parameters
+		query := `
 			SELECT wf.relative_path, s.name, s.kind, s.line, s.end_line, s.signature,
 				s.receiver, s.package, s.exported, s.language, s.docstring
 			FROM worktree_files wf
 			JOIN symbols s ON s.artifact_id = wf.artifact_id
-			WHERE wf.worktree_id=? AND s.name IN (`+placeholders+`)
-			ORDER BY s.name, wf.relative_path, s.line`, args...)
+			WHERE wf.worktree_id=? AND s.name IN (` + placeholders + `)
+			ORDER BY s.name, wf.relative_path, s.line`
+		rows, err := c.db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
