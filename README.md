@@ -20,6 +20,34 @@
 
 ---
 
+> ## 🔱 About this fork
+>
+> This is a **maintained fork** of [yoanbernabeu/grepai](https://github.com/yoanbernabeu/grepai)
+> (all credit for grepai itself to its author and contributors — the README below
+> describes the upstream tool and applies here unchanged). This fork's `main` is
+> its own base of record; upstream changes are merged in periodically.
+>
+> **What this fork adds** is a rebuilt indexing control plane for heavy
+> multi-agent, multi-repository use:
+>
+> - **v2 engine** (`internal/enginev2/`) — a durable SQLite catalog with
+>   git-truth reconciliation and a content-addressed vector cache. Its defining
+>   invariant: an unchanged repo never re-embeds anything (*idle = idle*).
+> - **`grepaid` host daemon** — one lazily-started daemon serves every
+>   registered repo through a Unix-socket API, with a host-wide scheduler and
+>   circuit breaker in front of your embedding endpoint. **Each repo keeps its
+>   own isolated catalog** (`.grepai/catalog_v2.db`), so a search in one repo
+>   structurally cannot surface another repo's code into an agent's context.
+> - **Opt-in per repo** — set `engine: v2` in `.grepai/config.yaml` (or
+>   `grepai init --engine v2`); classic v1 behavior is untouched by default,
+>   and v1/v2 can coexist on the same repo without corrupting each other.
+>
+> Docs: [`docs/GREPAID_DAEMON.md`](docs/GREPAID_DAEMON.md) (operations) ·
+> [`docs/GREPAI_V2_ARCHITECTURE_PLAN.md`](docs/GREPAI_V2_ARCHITECTURE_PLAN.md)
+> (design) · [`MAINTAINING.md`](MAINTAINING.md) (fork policy & divergence list).
+
+---
+
 `grepai` is a privacy-first CLI for semantic code search. It uses vector embeddings to understand code meaning, enabling natural language queries that find relevant code—even when naming conventions vary.
 
 **Drastically reduces AI agent input tokens** by providing relevant context instead of raw search results.
