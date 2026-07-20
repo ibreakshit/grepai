@@ -50,3 +50,22 @@ func (c *Catalog) WorktreeIndexedHashes(ctx context.Context, wt core.WorktreeID)
 	}
 	return res, rows.Err()
 }
+
+// Worktrees lists every registered worktree id, sorted, for cross-repo
+// fan-out queries.
+func (c *Catalog) Worktrees(ctx context.Context) ([]core.WorktreeID, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT worktree_id FROM worktrees ORDER BY worktree_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.WorktreeID
+	for rows.Next() {
+		var wt string
+		if err := rows.Scan(&wt); err != nil {
+			return nil, err
+		}
+		out = append(out, core.WorktreeID(wt))
+	}
+	return out, rows.Err()
+}

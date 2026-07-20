@@ -52,6 +52,29 @@ type SearchResponse struct {
 	Fresh            bool // true when the worktree has no pending index jobs
 }
 
+// SearchAllRequest searches every registered worktree (cross-repo fan-out).
+type SearchAllRequest struct {
+	Query      string
+	Limit      int    // global cap across all repos; <=0 uses the server default
+	PathPrefix string // repo-relative prefix applied within every repo ("" = all)
+}
+
+// RepoHit is one cross-repo result, tagged with its owning worktree.
+type RepoHit struct {
+	Worktree core.WorktreeID
+	Hit      core.SearchHit
+}
+
+// SearchAllResponse carries merged, score-ranked results across worktrees.
+// Skipped lists worktrees whose search failed (quarantine-lite: one broken
+// catalog does not take the whole query down — but the caller is TOLD).
+// Stale lists worktrees that served results while having pending index jobs.
+type SearchAllResponse struct {
+	Results []RepoHit
+	Stale   []core.WorktreeID
+	Skipped []core.WorktreeID
+}
+
 // TraceRequest issues a call-graph query within an explicit worktree view.
 type TraceRequest struct {
 	WorktreeID core.WorktreeID
@@ -115,6 +138,7 @@ type Service interface {
 	Register(ctx context.Context, req RegisterRequest) (RegisterResponse, error)
 	Reconcile(ctx context.Context, req ReconcileRequest) (ReconcileResponse, error)
 	Search(ctx context.Context, req SearchRequest) (SearchResponse, error)
+	SearchAll(ctx context.Context, req SearchAllRequest) (SearchAllResponse, error)
 	Trace(ctx context.Context, req TraceRequest) (TraceResponse, error)
 	Status(ctx context.Context, req StatusRequest) (StatusResponse, error)
 	WaitFresh(ctx context.Context, req WaitFreshRequest) (WaitFreshResponse, error)

@@ -18,6 +18,7 @@ const (
 	MethodWaitFresh   = "grepai.waitFresh"
 	MethodRebuild     = "grepai.rebuild"
 	MethodDeadLetters = "grepai.deadLetters"
+	MethodSearchAll   = "grepai.searchAll"
 )
 
 // Request is a JSON-RPC 2.0 request object.

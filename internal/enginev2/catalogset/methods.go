@@ -3,6 +3,7 @@ package catalogset
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/reconcile"
@@ -301,6 +302,23 @@ func (s *Set) DeadLetterCount(ctx context.Context) (int, error) {
 		total += n
 	}
 	return total, nil
+}
+
+// Worktrees unions every member's registered worktrees (sorted). A failing
+// member is skipped + reported (quarantine-lite): one broken catalog must not
+// take cross-repo search down for the healthy ones.
+func (s *Set) Worktrees(ctx context.Context) ([]core.WorktreeID, error) {
+	var out []core.WorktreeID
+	for _, m := range s.snapshot() {
+		wts, err := m.cat.Worktrees(ctx)
+		if err != nil {
+			s.reportErr(m.repo, err)
+			continue
+		}
+		out = append(out, wts...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
 }
 
 func (s *Set) RequeueClaimedJobs(ctx context.Context) (int, error) {

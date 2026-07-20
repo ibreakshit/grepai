@@ -164,6 +164,12 @@ func call(ctx context.Context, h service.Service, method string, params json.Raw
 			return nil, err
 		}
 		return h.Search(ctx, p)
+	case MethodSearchAll:
+		var p service.SearchAllRequest
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return h.SearchAll(ctx, p)
 	case MethodTrace:
 		var p service.TraceRequest
 		if err := decode(params, &p); err != nil {

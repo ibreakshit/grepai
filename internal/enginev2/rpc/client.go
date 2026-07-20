@@ -123,6 +123,12 @@ func (c *Client) Search(ctx context.Context, req service.SearchRequest) (service
 	return resp, err
 }
 
+func (c *Client) SearchAll(ctx context.Context, req service.SearchAllRequest) (service.SearchAllResponse, error) {
+	var resp service.SearchAllResponse
+	err := c.Call(ctx, MethodSearchAll, req, &resp)
+	return resp, err
+}
+
 func (c *Client) Trace(ctx context.Context, req service.TraceRequest) (service.TraceResponse, error) {
 	var resp service.TraceResponse
 	err := c.Call(ctx, MethodTrace, req, &resp)

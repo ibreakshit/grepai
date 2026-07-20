@@ -4,6 +4,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -62,5 +63,29 @@ func TestWorktreeIndexedHashes(t *testing.T) {
 	}
 	if len(other) != 0 {
 		t.Fatalf("wt2 should have no indexed hashes, got %v", other)
+	}
+}
+
+func TestWorktreesListsSorted(t *testing.T) {
+	ctx := context.Background()
+	c, err := Open(ctx, filepath.Join(t.TempDir(), "c.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for _, id := range []string{"/b", "/a"} {
+		if err := c.RegisterRepository(ctx, core.RepositoryID(id), id, ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.RegisterWorktree(ctx, core.WorktreeID(id), core.RepositoryID(id), id, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wts, err := c.Worktrees(ctx)
+	if err != nil {
+		t.Fatalf("Worktrees: %v", err)
+	}
+	if len(wts) != 2 || wts[0] != "/a" || wts[1] != "/b" {
+		t.Fatalf("Worktrees = %v, want [/a /b] sorted", wts)
 	}
 }

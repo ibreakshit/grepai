@@ -103,6 +103,7 @@ grepai init --engine v2   # write engine: v2 and register with the daemon
 grepai watch              # ensure-registered + reconcile + wait until fresh
 grepai search "auth flow" # query via the daemon
 grepai status             # generation / freshness / pending / dead-letters
+grepai search-all "auth"  # search ACROSS every registered repo, hits tagged per repo
 ```
 
 Under `engine: v2`:
