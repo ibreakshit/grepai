@@ -101,6 +101,11 @@ type TraceResponse struct {
 	Definitions     []core.SymbolAt
 	Edges           []core.EdgeAt
 	BackfillPending int
+	// Served is the capability marker: a trace-capable daemon always sets it.
+	// Pre-trace daemons registered the method but answered inertly; their JSON
+	// decodes here with Served=false, which the CLI turns into a loud
+	// restart-the-daemon error instead of a silent false-negative "no symbols".
+	Served bool
 }
 
 // StatusRequest asks for indexing/freshness status.

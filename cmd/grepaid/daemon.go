@@ -67,7 +67,7 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 	extractor := symbols.New()
 	bf := &backfillRunner{
 		ctx: ctx, set: set, loader: runtime.NewDiskLoader(), x: extractor, lg: lg,
-		sem: make(chan struct{}, 1), active: map[core.WorktreeID]bool{},
+		sem: make(chan struct{}, 1), active: map[core.WorktreeID]bool{}, attempted: map[core.WorktreeID]bool{},
 	}
 	regsvc := &registeringService{
 		Server:  inner,
@@ -492,22 +492,31 @@ type backfillRunner struct {
 	lg     *log.Logger
 	sem    chan struct{}
 
-	mu     sync.Mutex
-	active map[core.WorktreeID]bool
+	mu        sync.Mutex
+	active    map[core.WorktreeID]bool
+	attempted map[core.WorktreeID]bool
 }
 
 func (b *backfillRunner) maybeStart(wt core.WorktreeID, repo core.RepositoryID, root string) {
-	missing, err := b.set.ArtifactsMissingSymbols(b.ctx, wt)
-	if err != nil || len(missing) == 0 {
-		return
-	}
+	// Dedup BEFORE the catalog scan: Register is called by every daemon-backed
+	// CLI query, and one backfill attempt per worktree per daemon lifetime is
+	// enough — files skipped as changed/failed get their symbols from the live
+	// index path when the watcher recommits them.
 	b.mu.Lock()
-	if b.active[wt] {
+	if b.active[wt] || b.attempted[wt] {
 		b.mu.Unlock()
 		return
 	}
 	b.active[wt] = true
+	b.attempted[wt] = true
 	b.mu.Unlock()
+	missing, err := b.set.ArtifactsMissingSymbols(b.ctx, wt)
+	if err != nil || len(missing) == 0 {
+		b.mu.Lock()
+		delete(b.active, wt)
+		b.mu.Unlock()
+		return
+	}
 
 	go func() {
 		defer func() {

@@ -225,6 +225,17 @@ func runWatchDaemon(cmd *cobra.Command) error {
 // runTraceDaemon serves a top-level `grepai trace <dir> <symbol>` against the
 // daemon (engine:v2). Loud failures, no v1 fallback.
 func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int, asJSON bool) error {
+	// v1-only options fail loudly instead of being silently ignored (e.g.
+	// --workspace would otherwise misleadingly query only the current repo).
+	if traceWorkspace != "" || traceProject != "" {
+		return fmt.Errorf("--workspace/--project trace is not supported under engine: v2")
+	}
+	if traceTOON || traceUI {
+		return fmt.Errorf("--toon/--ui trace output is not supported under engine: v2 (use --json)")
+	}
+	if traceMode != "" && traceMode != "fast" {
+		return fmt.Errorf("--mode %s is not supported under engine: v2 (extraction mode is a daemon build-time property)", traceMode)
+	}
 	warnIfV1WatcherRunning(cmd)
 	ctx := context.Background()
 	client, err := ensureDaemonClient(ctx)
@@ -239,6 +250,9 @@ func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int, asJ
 	resp, err := client.Trace(ctx, service.TraceRequest{WorktreeID: wt, Symbol: symbol, Direction: direction, Depth: depth})
 	if err != nil {
 		return fmt.Errorf("trace: %w", err)
+	}
+	if !resp.Served {
+		return fmt.Errorf("the running grepaid daemon predates trace support (it answered inertly); restart it with `grepai daemon stop` — the next command auto-starts the new binary")
 	}
 	if resp.BackfillPending > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "note: symbol coverage still building (%d files pending backfill) — results may be incomplete\n", resp.BackfillPending)

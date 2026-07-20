@@ -261,7 +261,7 @@ func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, er
 	if dir == "" {
 		dir = TraceCallers
 	}
-	resp := TraceResponse{WorktreeID: req.WorktreeID}
+	resp := TraceResponse{WorktreeID: req.WorktreeID, Served: true}
 	defs, err := s.cat.SymbolDefinitions(ctx, req.WorktreeID, req.Symbol)
 	if err != nil {
 		return TraceResponse{}, err
@@ -298,9 +298,15 @@ func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, er
 	return resp, nil
 }
 
+// maxGraphSymbols bounds BFS breadth: expansion stops once this many symbols
+// have been visited, keeping worst-case catalog queries (2 per symbol) and
+// response size finite on densely connected graphs. Edges already discovered
+// are kept, so a truncated graph is a prefix, not an error.
+const maxGraphSymbols = 500
+
 // traceGraph BFS-expands both directions from root up to depth levels,
 // deduplicating edges. Level-by-level catalog queries keep it simple; depth is
-// capped by the caller.
+// capped by the caller and breadth by maxGraphSymbols.
 func (s *Server) traceGraph(ctx context.Context, wt core.WorktreeID, root string, depth int) ([]core.EdgeAt, error) {
 	type ekey struct {
 		caller, callee, path string
@@ -313,6 +319,9 @@ func (s *Server) traceGraph(ctx context.Context, wt core.WorktreeID, root string
 	for level := 0; level < depth && len(frontier) > 0; level++ {
 		var next []string
 		for _, sym := range frontier {
+			if len(visited) >= maxGraphSymbols {
+				return out, nil
+			}
 			for _, callersOf := range []bool{true, false} {
 				edges, err := s.cat.SymbolEdges(ctx, wt, sym, callersOf)
 				if err != nil {

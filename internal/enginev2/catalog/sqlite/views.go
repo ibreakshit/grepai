@@ -267,13 +267,20 @@ func (c *Catalog) ClaimNextJob(ctx context.Context, minPriority core.Priority) (
 }
 
 // putArtifactSymbolsTx persists artifact-scoped symbol data atomically with the
-// artifact (spec §5.3: symbols inherit the artifact's identity). Idempotent for
-// artifact reuse (INSERT OR IGNORE — an artifact's symbols are immutable, same
-// content ⇒ same extraction). When extracted is false (no extractor wired, or
+// artifact (spec §5.3: symbols inherit the artifact's identity). Replace
+// semantics: prior rows for the artifact are deleted first so a bumped
+// extractor version (re-backfill) genuinely re-extracts rather than merging
+// stale rows with new ones. When extracted is false (no extractor wired, or
 // extraction failed) the marker stays 0 so the backfill retries later.
 func putArtifactSymbolsTx(ctx context.Context, tx *sql.Tx, artifactID core.ArtifactID, defs []core.SymbolDef, edges []core.SymbolEdge, extracted bool) error {
 	if !extracted {
 		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM symbols WHERE artifact_id=?`, string(artifactID)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM symbol_edges WHERE artifact_id=?`, string(artifactID)); err != nil {
+		return err
 	}
 	for _, d := range defs {
 		if _, err := tx.ExecContext(ctx, `

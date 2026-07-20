@@ -6,15 +6,17 @@ import (
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
 
-// ArtifactsMissingSymbols lists active-view artifacts with symbols_version=0
-// for a worktree, sorted by path (deterministic backfill order).
+// ArtifactsMissingSymbols lists active-view artifacts whose symbols_version is
+// behind SymbolsVersionCurrent for a worktree, sorted by path (deterministic
+// backfill order). Bumping SymbolsVersionCurrent therefore triggers a
+// re-backfill, and putArtifactSymbolsTx's replace semantics make it correct.
 func (c *Catalog) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) ([]core.MissingSymbolArtifact, error) {
 	rows, err := c.db.QueryContext(ctx, `
 		SELECT wf.relative_path, fa.artifact_id, fa.source_hash
 		FROM worktree_files wf
 		JOIN file_artifacts fa ON fa.artifact_id = wf.artifact_id
-		WHERE wf.worktree_id=? AND fa.symbols_version=0
-		ORDER BY wf.relative_path`, string(wt))
+		WHERE wf.worktree_id=? AND fa.symbols_version < ?
+		ORDER BY wf.relative_path`, string(wt), SymbolsVersionCurrent)
 	if err != nil {
 		return nil, err
 	}
