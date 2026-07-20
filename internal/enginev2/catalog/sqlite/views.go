@@ -46,6 +46,9 @@ func commitUpdateTx(ctx context.Context, tx *sql.Tx, req core.CommitRequest, job
 	if err := putArtifactChunksTx(ctx, tx, req.Artifact.ID, req.Chunks); err != nil {
 		return err
 	}
+	if err := putArtifactSymbolsTx(ctx, tx, req.Artifact.ID, req.Symbols, req.SymbolEdges, req.SymbolsExtracted); err != nil {
+		return err
+	}
 	// Invariant 12 (search availability): a commit for a generation other than
 	// the repository's active one — e.g. a controlled rebuild building a new
 	// generation — stores the shared immutable artifact but must NOT switch the
@@ -261,4 +264,50 @@ func (c *Catalog) ClaimNextJob(ctx context.Context, minPriority core.Priority) (
 		return core.Job{}, false, err
 	}
 	return job, found, nil
+}
+
+// putArtifactSymbolsTx persists artifact-scoped symbol data atomically with the
+// artifact (spec §5.3: symbols inherit the artifact's identity). Replace
+// semantics: prior rows for the artifact are deleted first so a bumped
+// extractor version (re-backfill) genuinely re-extracts rather than merging
+// stale rows with new ones. When extracted is false (no extractor wired, or
+// extraction failed) the marker stays 0 so the backfill retries later.
+func putArtifactSymbolsTx(ctx context.Context, tx *sql.Tx, artifactID core.ArtifactID, defs []core.SymbolDef, edges []core.SymbolEdge, extracted bool) error {
+	if !extracted {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM symbols WHERE artifact_id=?`, string(artifactID)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM symbol_edges WHERE artifact_id=?`, string(artifactID)); err != nil {
+		return err
+	}
+	for _, d := range defs {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO symbols(artifact_id, name, kind, line, end_line, signature)
+			VALUES(?, ?, ?, ?, ?, ?)`,
+			string(artifactID), d.Name, d.Kind, d.Line, d.EndLine, d.Signature); err != nil {
+			return err
+		}
+	}
+	for _, e := range edges {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO symbol_edges(artifact_id, caller, callee, line)
+			VALUES(?, ?, ?, ?)`,
+			string(artifactID), e.Caller, e.Callee, e.Line); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx,
+		`UPDATE file_artifacts SET symbols_version=? WHERE artifact_id=?`,
+		SymbolsVersionCurrent, string(artifactID))
+	return err
+}
+
+// PutArtifactSymbols is the backfill write path: symbols + edges + version
+// marker in one transaction for an already-committed artifact.
+func (c *Catalog) PutArtifactSymbols(ctx context.Context, artifactID core.ArtifactID, defs []core.SymbolDef, edges []core.SymbolEdge) error {
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		return putArtifactSymbolsTx(ctx, tx, artifactID, defs, edges, true)
+	})
 }

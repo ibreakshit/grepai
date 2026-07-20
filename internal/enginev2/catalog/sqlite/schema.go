@@ -8,7 +8,7 @@ import (
 
 // schemaVersion is the current catalog schema version. Bump it and append a
 // migration when the schema changes.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // LatestSchemaVersion is the schema version this binary migrates a catalog to.
 // The daemon refuses to open a catalog stamped newer than this.
@@ -124,7 +124,45 @@ ALTER TABLE artifact_chunks ADD COLUMN start_line INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE artifact_chunks ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0;
 `
 
-var migrations = []string{migration0001, migration0002}
+// migration0003 rebuilds the dormant symbol tables for trace. The v1 shapes
+// keyed (artifact_id, name, kind) / (artifact_id, caller, callee), which would
+// collapse same-named symbols (Go methods on different receivers, overloads)
+// and repeated call sites at different lines under INSERT OR IGNORE — so the
+// key must include line. DROP is safe: no pre-v3 code path ever wrote these
+// tables (they are empty in every v2 catalog). Also adds the extraction marker
+// to file_artifacts (0 = never extracted; SymbolsVersionCurrent = extracted by
+// the current extractor).
+const migration0003 = `
+DROP TABLE symbols;
+DROP TABLE symbol_edges;
+CREATE TABLE symbols (
+  artifact_id TEXT NOT NULL REFERENCES file_artifacts(artifact_id),
+  name        TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  line        INTEGER NOT NULL DEFAULT 0,
+  end_line    INTEGER NOT NULL DEFAULT 0,
+  signature   TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (artifact_id, name, kind, line)
+);
+CREATE TABLE symbol_edges (
+  artifact_id TEXT NOT NULL REFERENCES file_artifacts(artifact_id),
+  caller      TEXT NOT NULL,
+  callee      TEXT NOT NULL,
+  line        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (artifact_id, caller, callee, line)
+);
+ALTER TABLE file_artifacts ADD COLUMN symbols_version INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX idx_symbols_name ON symbols(name);
+CREATE INDEX idx_symbol_edges_caller ON symbol_edges(caller);
+CREATE INDEX idx_symbol_edges_callee ON symbol_edges(callee);
+`
+
+var migrations = []string{migration0001, migration0002, migration0003}
+
+// SymbolsVersionCurrent is the extractor version stamped on artifacts whose
+// symbols have been extracted. Bump to force a fleet-wide re-backfill after an
+// extractor upgrade.
+const SymbolsVersionCurrent = 1
 
 // SchemaVersion returns the highest applied migration version (0 on a fresh DB).
 // Exported so the daemon can guard against opening a catalog written by a newer

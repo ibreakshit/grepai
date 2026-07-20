@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -225,12 +226,100 @@ func TestSearchRejectsBadQueryVector(t *testing.T) {
 	}
 }
 
-func TestTraceInert(t *testing.T) {
+// seedSymbols commits an artifact for (wt, path) carrying the given symbol
+// defs/edges (extracted=true), reusing the repo/generation setup from
+// seedWorktreeArtifact's conventions.
+func seedSymbols(t *testing.T, c *sqlite.Catalog, repo core.RepositoryID, wt core.WorktreeID, path string, defs []core.SymbolDef, edges []core.SymbolEdge) {
+	t.Helper()
 	ctx := context.Background()
-	_, _, s := newServer(t)
-	resp, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "X"})
-	if err != nil || len(resp.Symbols) != 0 {
-		t.Fatalf("trace must be inert: resp=%+v err=%v", resp, err)
+	_ = c.RegisterRepository(ctx, repo, "/"+string(repo), "")
+	_ = c.RegisterWorktree(ctx, wt, repo, "/"+string(wt), 1)
+	_ = c.CreateGeneration(ctx, repo, 1, "fp")
+	if err := c.SetActiveGeneration(ctx, repo, 1); err != nil {
+		t.Fatal(err)
+	}
+	key := core.ArtifactKey{RepositoryID: repo, RelativePath: path, SourceHash: "h-" + path, Fingerprint: "fp"}
+	art := core.Artifact{ID: key.ArtifactID(), Key: key, Dimensions: 4}
+	req := core.CommitRequest{
+		View:             core.ViewEntry{WorktreeID: wt, Path: path, ArtifactID: art.ID, Generation: 1},
+		Artifact:         art,
+		Symbols:          defs,
+		SymbolEdges:      edges,
+		SymbolsExtracted: true,
+	}
+	if err := c.CommitUpdate(ctx, req, core.Job{WorktreeID: wt, Path: path, DesiredHash: "h-" + path, Generation: 1, Operation: core.OpUpsert}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTraceCallersCalleesAndGraph(t *testing.T) {
+	ctx := context.Background()
+	c, _, s := newServer(t)
+	// a.go: HandleReq -> Validate ; b.go: Validate -> log ; c.go defines log.
+	seedSymbols(t, c, "r", "w", "a.go",
+		[]core.SymbolDef{{Name: "HandleReq", Kind: "function", Line: 3}},
+		[]core.SymbolEdge{{Caller: "HandleReq", Callee: "Validate", Line: 5}})
+	seedSymbols(t, c, "r", "w", "b.go",
+		[]core.SymbolDef{{Name: "Validate", Kind: "function", Line: 2}},
+		[]core.SymbolEdge{{Caller: "Validate", Callee: "log", Line: 4}})
+	seedSymbols(t, c, "r", "w", "c.go",
+		[]core.SymbolDef{{Name: "log", Kind: "function", Line: 1}}, nil)
+
+	callers, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "Validate", Direction: service.TraceCallers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !callers.Served {
+		t.Fatal("a trace-capable server must set the Served capability marker (old-daemon detection depends on it)")
+	}
+	if len(callers.Definitions) != 1 || callers.Definitions[0].Path != "b.go" {
+		t.Fatalf("Validate definitions wrong: %+v", callers.Definitions)
+	}
+	if len(callers.Edges) != 1 || callers.Edges[0].Caller != "HandleReq" || callers.Edges[0].Path != "a.go" {
+		t.Fatalf("callers wrong: %+v", callers.Edges)
+	}
+	callees, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "Validate", Direction: service.TraceCallees})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callees.Edges) != 1 || callees.Edges[0].Callee != "log" {
+		t.Fatalf("callees wrong: %+v", callees.Edges)
+	}
+	// Graph depth 2 from Validate reaches both edges.
+	graph, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "Validate", Direction: service.TraceGraph, Depth: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Edges) != 2 {
+		t.Fatalf("graph should have 2 edges, got %+v", graph.Edges)
+	}
+	if graph.BackfillPending != 0 {
+		t.Fatalf("no backfill expected, got %d", graph.BackfillPending)
+	}
+	// Empty symbol is a loud error; unknown direction too.
+	if _, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w"}); err == nil {
+		t.Fatal("empty symbol must error")
+	}
+	if _, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "X", Direction: "sideways"}); err == nil {
+		t.Fatal("unknown direction must error")
+	}
+}
+
+func TestTraceIsWorktreeIsolated(t *testing.T) {
+	ctx := context.Background()
+	c, _, s := newServer(t)
+	seedSymbols(t, c, "ra", "wa", "a.go", []core.SymbolDef{{Name: "Dup", Kind: "function", Line: 1}},
+		[]core.SymbolEdge{{Caller: "Other", Callee: "Dup", Line: 2}})
+	seedSymbols(t, c, "rb", "wb", "b.go", []core.SymbolDef{{Name: "Dup", Kind: "function", Line: 9}}, nil)
+	resp, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "wb", Symbol: "Dup", Direction: service.TraceCallers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Definitions) != 1 || resp.Definitions[0].Path != "b.go" {
+		t.Fatalf("wb must only see its own Dup: %+v", resp.Definitions)
+	}
+	if len(resp.Edges) != 0 {
+		t.Fatalf("wa's edges must not leak into wb: %+v", resp.Edges)
 	}
 }
 
@@ -282,5 +371,39 @@ func TestSearchAllLimitAndStale(t *testing.T) {
 	}
 	if len(resp.Stale) != 1 || resp.Stale[0] != "wb" {
 		t.Fatalf("wb should be reported stale, got %+v", resp.Stale)
+	}
+}
+
+// TestTraceGraphFanoutIsBounded seeds a root whose fanout exceeds
+// maxGraphSymbols (600 callees, each calling one further leaf) and asserts the
+// admission-checked caps hold: all first-level edges return, but second-level
+// expansion is cut off at the visited-symbol cap instead of doubling the
+// response.
+func TestTraceGraphFanoutIsBounded(t *testing.T) {
+	ctx := context.Background()
+	c, _, s := newServer(t)
+	defs := []core.SymbolDef{{Name: "Run", Kind: "function", Line: 1}}
+	var edges []core.SymbolEdge
+	for i := 0; i < 600; i++ {
+		callee := fmt.Sprintf("Callee%03d", i)
+		edges = append(edges, core.SymbolEdge{Caller: "Run", Callee: callee, Line: i + 2})
+		edges = append(edges, core.SymbolEdge{Caller: callee, Callee: fmt.Sprintf("Leaf%03d", i), Line: i + 1000})
+	}
+	seedSymbols(t, c, "r", "w", "big.go", defs, edges)
+
+	resp, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "Run", Direction: service.TraceGraph, Depth: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Edges) < 600 {
+		t.Fatalf("first-level edges must all return, got %d", len(resp.Edges))
+	}
+	// Unbounded expansion would return all 1200 edges; the ~500-symbol
+	// admission cap must cut the second level short.
+	if len(resp.Edges) >= 1200 {
+		t.Fatalf("visited-symbol cap did not bound expansion: %d edges", len(resp.Edges))
+	}
+	if len(resp.Edges) > 2000 {
+		t.Fatalf("edge cap exceeded: %d", len(resp.Edges))
 	}
 }

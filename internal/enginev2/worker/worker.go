@@ -14,6 +14,7 @@ type Catalog interface {
 	WorktreeInfo(ctx context.Context, wt core.WorktreeID) (string, core.RepositoryID, error)
 	GenerationFingerprint(ctx context.Context, repo core.RepositoryID, gen core.Generation) (string, error)
 	GetArtifact(ctx context.Context, key core.ArtifactKey) (core.Artifact, bool, error)
+	ArtifactSymbolsCurrent(ctx context.Context, key core.ArtifactKey) (bool, error)
 	PutChunkVector(ctx context.Context, chunkID string, repo core.RepositoryID, fingerprint string, vec []float32, content string) error
 	CommitUpdate(ctx context.Context, req core.CommitRequest, job core.Job) error
 	CommitDelete(ctx context.Context, wt core.WorktreeID, relPath string, gen core.Generation, job core.Job) error
@@ -40,6 +41,14 @@ type Builder interface {
 	Build(ctx context.Context, req artifacts.BuildRequest) (core.Artifact, artifacts.EndpointResult, error)
 }
 
+// SymbolExtractor extracts artifact-scoped symbol definitions and call edges
+// from file content (satisfied by *symbols.Extractor). Derived data: extraction
+// failures are non-fatal — the artifact commits without symbols and the marker
+// stays 0 so the daemon backfill retries later.
+type SymbolExtractor interface {
+	Extract(ctx context.Context, relPath, content string) ([]core.SymbolDef, []core.SymbolEdge, error)
+}
+
 // CrashHook is called at durable-state boundaries; a non-nil return simulates
 // a process crash at that point. Production uses NoCrash.
 type CrashHook func(name string) error
@@ -55,7 +64,13 @@ type Worker struct {
 	load        ContentLoader
 	crash       CrashHook
 	maxAttempts int
+	symbols     SymbolExtractor // nil: no extraction (marker stays 0)
 }
+
+// SetSymbolExtractor wires symbol extraction into the build path. Optional —
+// nil keeps the pre-trace behavior (used by tests and the one-shot runtime
+// until it opts in).
+func (w *Worker) SetSymbolExtractor(x SymbolExtractor) { w.symbols = x }
 
 // New constructs a Worker. A nil crash hook defaults to NoCrash; maxAttempts
 // below 1 defaults to 5.
@@ -175,6 +190,26 @@ func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, art
 		View:     core.ViewEntry{WorktreeID: job.WorktreeID, Path: job.Path, ArtifactID: art.ID, Generation: job.Generation},
 		Artifact: art,
 		Chunks:   art.Chunks, // nil for a whole-file cache hit (mapping already present)
+	}
+	// Symbol extraction (artifact-scoped derived data, spec §5.3). A whole-file
+	// cache hit usually reuses an artifact whose symbols were extracted when it
+	// was first committed — but a cache hit can also RE-ACTIVATE an artifact
+	// committed by a pre-trace binary (e.g. a revert), and the one-shot daemon
+	// backfill will not rescan, so a stale symbol version must be repaired
+	// here. Extraction errors are non-fatal: the artifact still commits,
+	// SymbolsExtracted stays false, and the daemon backfill retries later.
+	if w.symbols != nil {
+		needsSymbols := true
+		if wholeHit {
+			if current, cerr := w.cat.ArtifactSymbolsCurrent(ctx, key); cerr == nil && current {
+				needsSymbols = false
+			}
+		}
+		if needsSymbols {
+			if defs, edges, serr := w.symbols.Extract(ctx, job.Path, string(content)); serr == nil {
+				req.Symbols, req.SymbolEdges, req.SymbolsExtracted = defs, edges, true
+			}
+		}
 	}
 	if err := w.cat.CommitUpdate(ctx, req, job); err != nil {
 		return OutcomeTransient, ep, err

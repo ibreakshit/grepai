@@ -148,8 +148,15 @@ v1 inert.
   `watch` run (it still appears in `grepai status` and the daemon log).
   `watch` always exits 0 once the index is fresh; failed files are reported as a
   warning, not an exit code.
-- **Trace/symbols, RPG refresh, MCP, and generation-scoped controlled rebuild**
-  are not served by the daemon yet; `grepai mcp-serve` refuses to start (loudly)
-  for an engine:v2 repo or a workspace containing one, since the v1 store it
-  reads is retired there.
+- **Trace is served by the daemon** for engine:v2 repos: symbols are extracted
+  in the build path (regex extractor in CGO-free builds; tree-sitter behind the
+  `treesitter` build tag) and stored artifact-scoped in the catalog, so
+  `grepai trace callers|callees|graph` reads the active view. Catalogs written
+  by a pre-trace binary are backfilled automatically on daemon start (CPU-only,
+  one repo at a time host-wide, no re-embedding); until backfill completes,
+  trace prints a "coverage still building" note with the pending file count.
+- **RPG refresh, MCP, and generation-scoped controlled rebuild** are not served
+  by the daemon yet; `grepai mcp-serve` refuses to start (loudly) for an
+  engine:v2 repo or a workspace containing one, since the v1 store it reads is
+  retired there.
 - **Linux only** for the daemon process paths (flock + detached spawn).

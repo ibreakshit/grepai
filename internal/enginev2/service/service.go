@@ -75,17 +75,37 @@ type SearchAllResponse struct {
 	Skipped []core.WorktreeID
 }
 
+// Trace directions.
+const (
+	TraceCallers = "callers"
+	TraceCallees = "callees"
+	TraceGraph   = "graph"
+)
+
 // TraceRequest issues a call-graph query within an explicit worktree view.
+// Direction is one of TraceCallers/TraceCallees/TraceGraph; Depth applies to
+// graph only (default 2, capped at 5).
 type TraceRequest struct {
 	WorktreeID core.WorktreeID
 	Symbol     string
+	Direction  string
+	Depth      int
 }
 
-// TraceResponse carries call-graph symbols. Symbol extraction is deferred, so
-// this phase always returns an empty Symbols slice.
+// TraceResponse carries the symbol's definitions and the call edges in the
+// requested direction, all resolved through the worktree's ACTIVE view.
+// BackfillPending>0 means symbol coverage is still building for this worktree
+// (artifacts committed before extraction existed) — results may be incomplete.
 type TraceResponse struct {
-	WorktreeID core.WorktreeID
-	Symbols    []string
+	WorktreeID      core.WorktreeID
+	Definitions     []core.SymbolAt
+	Edges           []core.EdgeAt
+	BackfillPending int
+	// Served is the capability marker: a trace-capable daemon always sets it.
+	// Pre-trace daemons registered the method but answered inertly; their JSON
+	// decodes here with Served=false, which the CLI turns into a loud
+	// restart-the-daemon error instead of a silent false-negative "no symbols".
+	Served bool
 }
 
 // StatusRequest asks for indexing/freshness status.
