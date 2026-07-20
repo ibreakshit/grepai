@@ -189,3 +189,66 @@ func TestDeleteOpRemovesView(t *testing.T) {
 		t.Fatal("delete op should remove the view")
 	}
 }
+
+// fakeExtractor returns canned symbol data (and counts calls).
+type fakeExtractor struct{ calls int }
+
+func (f *fakeExtractor) Extract(_ context.Context, relPath, _ string) ([]core.SymbolDef, []core.SymbolEdge, error) {
+	f.calls++
+	return []core.SymbolDef{{Name: "main", Kind: "function", Line: 1}},
+		[]core.SymbolEdge{{Caller: "main", Callee: "helper", Line: 1}}, nil
+}
+
+func TestProcessCommitsSymbolsAtomically(t *testing.T) {
+	ctx := context.Background()
+	emb := enginetest.NewFakeEmbedder(4)
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c)
+	w := worker.New(c, realBuilder(emb, c), staticLoader{content: []byte("func main() { helper() }")}, worker.NoCrash, 5)
+	fx := &fakeExtractor{}
+	w.SetSymbolExtractor(fx)
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	if did, err := w.ProcessOne(ctx); err != nil || !did {
+		t.Fatalf("did=%v err=%v", did, err)
+	}
+	// Symbols landed with the commit and are trace-readable through the view.
+	defs, err := c.SymbolDefinitions(ctx, "w", "main")
+	if err != nil || len(defs) != 1 || defs[0].Path != "a.go" {
+		t.Fatalf("symbols not committed with artifact: %+v err=%v", defs, err)
+	}
+	callers, err := c.SymbolEdges(ctx, "w", "helper", true)
+	if err != nil || len(callers) != 1 || callers[0].Caller != "main" {
+		t.Fatalf("edges not committed: %+v err=%v", callers, err)
+	}
+	// The artifact is no longer in the backfill worklist.
+	miss, err := c.ArtifactsMissingSymbols(ctx, "w")
+	if err != nil || len(miss) != 0 {
+		t.Fatalf("committed artifact still needs backfill: %+v err=%v", miss, err)
+	}
+	if fx.calls != 1 {
+		t.Fatalf("extractor calls = %d, want 1", fx.calls)
+	}
+}
+
+func TestWholeFileCacheHitSkipsExtraction(t *testing.T) {
+	ctx := context.Background()
+	emb := enginetest.NewFakeEmbedder(4)
+	c := newTestCatalog(t)
+	seedRepoWorktree(t, c)
+	fx := &fakeExtractor{}
+	w := worker.New(c, realBuilder(emb, c), staticLoader{content: []byte("func main() {}")}, worker.NoCrash, 5)
+	w.SetSymbolExtractor(fx)
+	// First commit extracts; a re-index of identical content is a whole-file
+	// cache hit whose artifact already carries symbols — no second extraction.
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	if _, err := w.ProcessOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	must(t, c.UpsertJob(ctx, core.Job{WorktreeID: "w", Path: "a.go", DesiredHash: "h1", Generation: 1, Operation: core.OpUpsert, Priority: core.PriorityReconcile}))
+	if _, err := w.ProcessOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fx.calls != 1 {
+		t.Fatalf("cache hit must skip extraction; extractor calls = %d", fx.calls)
+	}
+}

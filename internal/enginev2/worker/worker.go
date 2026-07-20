@@ -40,6 +40,14 @@ type Builder interface {
 	Build(ctx context.Context, req artifacts.BuildRequest) (core.Artifact, artifacts.EndpointResult, error)
 }
 
+// SymbolExtractor extracts artifact-scoped symbol definitions and call edges
+// from file content (satisfied by *symbols.Extractor). Derived data: extraction
+// failures are non-fatal — the artifact commits without symbols and the marker
+// stays 0 so the daemon backfill retries later.
+type SymbolExtractor interface {
+	Extract(ctx context.Context, relPath, content string) ([]core.SymbolDef, []core.SymbolEdge, error)
+}
+
 // CrashHook is called at durable-state boundaries; a non-nil return simulates
 // a process crash at that point. Production uses NoCrash.
 type CrashHook func(name string) error
@@ -55,7 +63,13 @@ type Worker struct {
 	load        ContentLoader
 	crash       CrashHook
 	maxAttempts int
+	symbols     SymbolExtractor // nil: no extraction (marker stays 0)
 }
+
+// SetSymbolExtractor wires symbol extraction into the build path. Optional —
+// nil keeps the pre-trace behavior (used by tests and the one-shot runtime
+// until it opts in).
+func (w *Worker) SetSymbolExtractor(x SymbolExtractor) { w.symbols = x }
 
 // New constructs a Worker. A nil crash hook defaults to NoCrash; maxAttempts
 // below 1 defaults to 5.
@@ -175,6 +189,16 @@ func (w *Worker) ProcessClaimed(ctx context.Context, job core.Job) (Outcome, art
 		View:     core.ViewEntry{WorktreeID: job.WorktreeID, Path: job.Path, ArtifactID: art.ID, Generation: job.Generation},
 		Artifact: art,
 		Chunks:   art.Chunks, // nil for a whole-file cache hit (mapping already present)
+	}
+	// Symbol extraction (artifact-scoped derived data, spec §5.3). A whole-file
+	// cache hit reuses an artifact whose symbols were extracted when it was
+	// first committed — no work. Extraction errors are non-fatal: the artifact
+	// still commits, SymbolsExtracted stays false, and the daemon backfill
+	// retries later.
+	if w.symbols != nil && !wholeHit {
+		if defs, edges, serr := w.symbols.Extract(ctx, job.Path, string(content)); serr == nil {
+			req.Symbols, req.SymbolEdges, req.SymbolsExtracted = defs, edges, true
+		}
 	}
 	if err := w.cat.CommitUpdate(ctx, req, job); err != nil {
 		return OutcomeTransient, ep, err

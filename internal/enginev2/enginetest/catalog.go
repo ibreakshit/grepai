@@ -18,6 +18,7 @@ type viewKey struct {
 // artifact reuse, per-worktree view isolation, atomic commit, and priority
 // job claiming; it does not persist or enforce SQL constraints.
 type FakeCatalog struct {
+	lastCommit core.CommitRequest
 	mu         sync.Mutex
 	artifacts  map[core.ArtifactKey]core.Artifact
 	views      map[viewKey]core.ViewEntry
@@ -71,6 +72,7 @@ func (c *FakeCatalog) ResolveView(ctx context.Context, wt core.WorktreeID, relPa
 func (c *FakeCatalog) CommitUpdate(ctx context.Context, req core.CommitRequest, job core.Job) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.lastCommit = req
 	c.artifacts[req.Artifact.Key] = req.Artifact
 	c.views[viewKey{req.View.WorktreeID, req.View.Path}] = req.View
 	// Mark the job complete: a committed (worktree, path) is no longer queued,
@@ -83,6 +85,14 @@ func (c *FakeCatalog) CommitUpdate(ctx context.Context, req core.CommitRequest, 
 		}
 	}
 	return nil
+}
+
+// LastCommit returns the most recent CommitUpdate request (test assertions on
+// symbol payloads riding the commit).
+func (c *FakeCatalog) LastCommit() core.CommitRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastCommit
 }
 
 // UpsertJob records desired file state, superseding older generations for the
