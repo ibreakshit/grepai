@@ -112,3 +112,34 @@ func TestBuildEmptyContentIsValidEmptyArtifact(t *testing.T) {
 		t.Fatal("empty content must not embed")
 	}
 }
+
+func TestBuildBinaryContentSkipsEmbedding(t *testing.T) {
+	ctx := context.Background()
+	emb := enginetest.NewFakeEmbedder(4)
+	ch := indexer.NewChunker(512, 50)
+	b := artifacts.New(ch, emb, mapCache{m: map[string][]float32{}})
+
+	// PNG-like bytes (NUL) and invalid UTF-8: both are binary per the v1
+	// scanner heuristic and must become valid EMPTY artifacts — recorded as
+	// indexed (reconcile stays idle) but never sent to the embedder.
+	cases := map[string][]byte{
+		"logo.png":  {0x89, 'P', 'N', 'G', 0x00, 0x1a, 0x0a, 0x00, 0xff},
+		"weird.bin": {0xff, 0xfe, 0xfd, 'a', 'b', 0xc0, 0x01},
+	}
+	for name, content := range cases {
+		key := core.ArtifactKey{RepositoryID: "r", RelativePath: name, SourceHash: "h-" + name, Fingerprint: "fp"}
+		art, ep, err := b.Build(ctx, artifacts.BuildRequest{Key: key, Content: content})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(art.Chunks) != 0 || art.ID != key.ArtifactID() {
+			t.Fatalf("%s: binary should build a valid empty artifact, got %+v", name, art)
+		}
+		if ep != artifacts.EndpointNotContacted {
+			t.Fatalf("%s: binary must not contact the endpoint, got %v", name, ep)
+		}
+	}
+	if emb.TextsEmbedded() != 0 {
+		t.Fatalf("binary content must never embed; embedded %d texts", emb.TextsEmbedded())
+	}
+}

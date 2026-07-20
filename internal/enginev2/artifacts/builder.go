@@ -3,8 +3,10 @@
 package artifacts
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"unicode/utf8"
 
 	"github.com/yoanbernabeu/grepai/indexer"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -40,6 +42,14 @@ const (
 // breaker reacts only to real endpoint signals.
 type ArtifactBuilder interface {
 	Build(ctx context.Context, req BuildRequest) (core.Artifact, EndpointResult, error)
+}
+
+// isBinary reports whether content is binary, using the same heuristic as the
+// v1 scanner (indexer/scanner.go): invalid UTF-8 or any NUL byte. Keeping the
+// two engines' definitions identical means a file skipped by v1 is also skipped
+// by v2.
+func isBinary(content []byte) bool {
+	return !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0
 }
 
 // ErrDimensionMismatch signals an embedding (or cached vector) whose length
@@ -78,6 +88,16 @@ var _ ArtifactBuilder = (*DefaultBuilder)(nil)
 func (b *DefaultBuilder) Build(ctx context.Context, req BuildRequest) (core.Artifact, EndpointResult, error) {
 	dims := b.emb.Dimensions()
 	art := core.Artifact{ID: req.Key.ArtifactID(), Key: req.Key, Dimensions: dims}
+
+	// Binary content (v1 scanner heuristic: invalid UTF-8 or a NUL byte) becomes
+	// a valid EMPTY artifact: the file is recorded as indexed at its hash so
+	// reconciliation stays idle, but nothing is chunked or embedded. Without
+	// this, raw image/binary bytes reach the embedding endpoint, time out,
+	// dead-letter after retries, and their failures open the circuit breaker —
+	// throttling every healthy job on the host.
+	if isBinary(req.Content) {
+		return art, EndpointNotContacted, nil
+	}
 
 	infos := b.chunker.Chunk(req.Key.RelativePath, string(req.Content))
 	if len(infos) == 0 {
