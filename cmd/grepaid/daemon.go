@@ -49,6 +49,9 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 
 	set := catalogset.New()
 	defer set.Close()
+	set.OnAggregateError(func(repo core.RepositoryID, err error) {
+		lg.Printf("aggregate: skipping catalog %s: %v", repo, err)
+	})
 	br := catalogset.NewBuilderRouter()
 
 	reg, err := registry.Load(p.Registry)
@@ -73,9 +76,15 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 
 	// Rehydrate every known repo through the same register path (opens the
 	// catalog, builds its per-repo builder, rolls a fingerprint mismatch, and
-	// refreshes the registry). A repo that fails (dir gone, schema too new) is
-	// logged and skipped, never wedging the daemon.
+	// refreshes the registry). A repo that fails (schema too new, open error) is
+	// logged and skipped, never wedging the daemon. A repo whose directory is
+	// gone is skipped BEFORE Register, which would otherwise recreate the
+	// deleted .grepai directory (spec: "repo dir gone → skip + log").
 	for _, e := range reg.Entries {
+		if _, statErr := os.Stat(e.Root); statErr != nil {
+			lg.Printf("startup: skipping repo %s: root missing (%v)", e.RepositoryID, statErr)
+			continue
+		}
 		if _, err := regsvc.Register(ctx, service.RegisterRequest{Root: e.Root}); err != nil {
 			lg.Printf("startup: skipping repo %s: %v", e.RepositoryID, err)
 		}
@@ -94,14 +103,28 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 		return fmt.Errorf("build scheduler: %w", err)
 	}
 
-	// Listen. The flock (held by main) makes unlinking a stale socket safe.
-	_ = os.Remove(p.Socket)
+	// Listen. The flock (held by main) makes unlinking a stale socket safe —
+	// but only ever unlink an actual socket: a mistyped GREPAID_SOCKET pointing
+	// at a regular file must not delete it.
+	if err := os.MkdirAll(filepath.Dir(p.Socket), 0o700); err != nil {
+		return fmt.Errorf("create socket dir: %w", err)
+	}
+	if fi, statErr := os.Lstat(p.Socket); statErr == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("refusing to remove %s: exists and is not a socket", p.Socket)
+		}
+		_ = os.Remove(p.Socket)
+	}
 	l, err := net.Listen("unix", p.Socket)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", p.Socket, err)
 	}
+	// The RPC surface is unauthenticated; the socket mode is the access control.
+	// A chmod failure is fatal, not a log line.
 	if err := os.Chmod(p.Socket, 0o600); err != nil {
-		lg.Printf("chmod socket: %v", err)
+		_ = l.Close()
+		_ = os.Remove(p.Socket)
+		return fmt.Errorf("chmod socket: %w", err)
 	}
 
 	// The scheduler runs under a derived context so a serve failure also stops it.
@@ -133,8 +156,13 @@ func runWithEmbedder(ctx context.Context, p daemoncfg.Paths, cfg *daemoncfg.Conf
 	cancel()
 	select {
 	case <-schDone:
-	case <-time.After(10 * time.Second):
-		lg.Printf("scheduler did not drain within 10s; closing catalogs anyway")
+	case <-time.After(30 * time.Second):
+		// Last resort for an embedder call that ignores cancellation. Closing
+		// the catalogs under an in-flight commit is safe for durability (the
+		// commit fails, the job stays claimed, and Recover requeues it on next
+		// start) — it just logs an ugly error, which is preferable to a daemon
+		// that can never shut down.
+		lg.Printf("scheduler did not drain within 30s; closing catalogs anyway (claimed jobs will be recovered on next start)")
 	}
 	_ = os.Remove(p.Socket)
 	lg.Printf("shutting down")
@@ -168,6 +196,32 @@ func (m *registryManager) upsert(e registry.Entry) error {
 	defer m.mu.Unlock()
 	m.reg.Upsert(e)
 	return m.reg.Save(m.path)
+}
+
+// has reports whether repoID is already registered.
+func (m *registryManager) has(repoID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.reg.Entries {
+		if e.RepositoryID == repoID {
+			return true
+		}
+	}
+	return false
+}
+
+// touchReconcile refreshes a repo's registry cursor after a reconcile.
+func (m *registryManager) touchReconcile(repoID string, pending int, at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.reg.Entries {
+		if m.reg.Entries[i].RepositoryID == repoID {
+			m.reg.Entries[i].LastReconciledAt = at.UTC().Format(time.RFC3339)
+			m.reg.Entries[i].PendingCount = pending
+			_ = m.reg.Save(m.path) // best-effort cursor cache
+			return
+		}
+	}
 }
 
 // registeringService decorates service.Server so a Register call also opens the
@@ -213,11 +267,13 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 	}
 	s.br.Add(repo, artifacts.New(indexer.NewChunker(s.size, s.overlap), s.emb, cache))
 
+	firstRegistration := !s.reg.has(string(repo))
+
 	resp, err := s.Server.Register(ctx, service.RegisterRequest{Root: canonical})
 	if err != nil {
 		return resp, err
 	}
-	if err := s.rollIfMismatch(ctx, repo); err != nil {
+	if err := s.rollIfMismatch(ctx, repo, resp.WorktreeID); err != nil {
 		return resp, err
 	}
 
@@ -233,6 +289,18 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 	}); err != nil {
 		s.lg.Printf("registry update for %s failed: %v", repo, err)
 	}
+
+	// A brand-new registration kicks off its initial reconcile so `init` and a
+	// first `search` actually start indexing (otherwise an empty catalog reports
+	// fresh with zero results). Register is a mutation path, so enqueueing here
+	// keeps invariant 3 intact (query paths still never enqueue).
+	if firstRegistration {
+		if rresp, rerr := s.Server.Reconcile(ctx, service.ReconcileRequest{WorktreeID: resp.WorktreeID}); rerr != nil {
+			s.lg.Printf("initial reconcile for %s failed: %v", repo, rerr)
+		} else {
+			s.lg.Printf("registered %s: initial reconcile queued %d jobs", repo, rresp.JobsQueued)
+		}
+	}
 	return resp, nil
 }
 
@@ -240,7 +308,19 @@ func (s *registeringService) Register(ctx context.Context, req service.RegisterR
 // fingerprint when its active generation was built with a different embedder
 // (a background service must not wedge on one stale repo; the old vectors are
 // unrankable against the daemon's query embeddings).
-func (s *registeringService) rollIfMismatch(ctx context.Context, repo core.RepositoryID) error {
+//
+// Because the worktree view is not generation-filtered, rolling the generation
+// alone is not enough: reconciliation would still see the old hashes (queue
+// nothing) and search would keep serving incompatible vectors. So the roll also
+// CLEARS the worktree's view+jobs — the next reconcile re-desires every file
+// under the new fingerprint, and search is transiently empty (correct) until
+// reindexed.
+//
+// The generation advance is crash-idempotent: it scans forward from active+1,
+// reusing a generation that already carries the daemon fingerprint (a prior
+// crash between create and activate) and skipping any occupied by a different
+// fingerprint, so a restart never fails on the unique generation key.
+func (s *registeringService) rollIfMismatch(ctx context.Context, repo core.RepositoryID, wt core.WorktreeID) error {
 	active, err := s.set.ActiveGeneration(ctx, repo)
 	if err != nil {
 		return err
@@ -253,14 +333,41 @@ func (s *registeringService) rollIfMismatch(ctx context.Context, repo core.Repos
 		return nil
 	}
 	next := active + 1
-	if err := s.set.CreateGeneration(ctx, repo, next, s.fp); err != nil {
-		return err
+	for {
+		existingFP, gerr := s.set.GenerationFingerprint(ctx, repo, next)
+		if gerr != nil { // free slot: create it
+			if cerr := s.set.CreateGeneration(ctx, repo, next, s.fp); cerr != nil {
+				return cerr
+			}
+			break
+		}
+		if existingFP == s.fp { // left over from a crashed prior roll: reuse
+			break
+		}
+		next++ // occupied by another fingerprint: keep scanning
 	}
 	if err := s.set.SetActiveGeneration(ctx, repo, next); err != nil {
 		return err
 	}
-	s.lg.Printf("repo %s fingerprint mismatch (%s != daemon %s); rolled to generation %d", repo, activeFP, s.fp, next)
+	if err := s.set.ClearWorktreeState(ctx, wt); err != nil {
+		return err
+	}
+	s.lg.Printf("repo %s fingerprint mismatch (%s != daemon %s); rolled to generation %d and cleared the view for reindex", repo, activeFP, s.fp, next)
 	return nil
+}
+
+// Reconcile delegates to the inner service, then refreshes the repo's registry
+// cursor (LastReconciledAt/PendingCount) — a cheap status cache for
+// `grepai daemon status` and restart.
+func (s *registeringService) Reconcile(ctx context.Context, req service.ReconcileRequest) (service.ReconcileResponse, error) {
+	resp, err := s.Server.Reconcile(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	if _, repo, werr := s.set.WorktreeInfo(ctx, req.WorktreeID); werr == nil {
+		s.reg.touchReconcile(string(repo), resp.JobsQueued, time.Now())
+	}
+	return resp, nil
 }
 
 // canonicalizeRoot resolves an absolute, symlink-free root so the same physical

@@ -51,6 +51,23 @@ func (c *Catalog) DeleteJobsForWorktree(ctx context.Context, wt core.WorktreeID)
 	})
 }
 
+// ClearWorktreeState atomically drops a worktree's file view AND its queued
+// jobs. Used by the daemon's fingerprint rollover: without clearing the view,
+// reconciliation would see the old generation's indexed hashes (the view is not
+// generation-filtered), queue zero jobs, and search would keep serving vectors
+// from an incompatible embedder. Artifacts and cached chunk vectors are left in
+// place — they are content+fingerprint addressed, so the new fingerprint simply
+// misses them.
+func (c *Catalog) ClearWorktreeState(ctx context.Context, wt core.WorktreeID) error {
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM worktree_files WHERE worktree_id=?`, string(wt)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `DELETE FROM index_jobs WHERE worktree_id=?`, string(wt))
+		return err
+	})
+}
+
 // RequeueClaimedJobs releases every claimed job so a restarted worker can
 // re-claim work a crashed worker left in flight (invariant 7 recovery).
 func (c *Catalog) RequeueClaimedJobs(ctx context.Context) (int, error) {

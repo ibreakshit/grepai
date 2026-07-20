@@ -24,16 +24,19 @@ Resolved from XDG conventions (Linux):
 
 | What | Path |
 |------|------|
-| State directory | `$XDG_STATE_HOME/grepai` else `~/.local/state/grepai` |
-| Host daemon config | `<state>/grepai/daemon.json` |
-| Repository registry | `<state>/grepai/registry.json` |
+| State directory (`<state>`) | `$XDG_STATE_HOME/grepai` else `~/.local/state/grepai` |
+| Host daemon config | `<state>/daemon.json` |
+| Repository registry | `<state>/registry.json` |
 | Unix socket | `$XDG_RUNTIME_DIR/grepai/grepaid.sock` else `<state>/grepaid.sock` |
 | Singleton lock (holds the pid) | `<state>/grepaid.lock` |
 | Log | `<state>/logs/grepaid.log` |
 | Per-repo index | `<repo>/.grepai/catalog_v2.db` |
 
-Override the socket with `GREPAID_SOCKET`, or per-repo via `daemon.socket` in the
-repo's `.grepai/config.yaml`.
+Override the socket with `GREPAID_SOCKET`, per-repo via `daemon.socket` in the
+repo's `.grepai/config.yaml`, or host-wide via `socket` in `daemon.json`
+(precedence: per-repo config > `GREPAID_SOCKET` > `daemon.json` > XDG default;
+a client-side socket is passed through to a lazily-spawned daemon so both ends
+always agree).
 
 ## `daemon.json` (host-global settings)
 
@@ -55,10 +58,13 @@ run a default file is written:
 }
 ```
 
-Any field can be overridden by a `GREPAID_*` environment variable. If a
-repository's existing `catalog_v2.db` was built with a *different* embedder
-(fingerprint mismatch), the daemon logs it and rolls that repository to a fresh
-generation on next reconcile — it never wedges on one stale repository.
+The socket can be overridden with `GREPAID_SOCKET` (other fields are edited in
+the file; broader env overrides are a planned refinement). If a repository's
+existing `catalog_v2.db` was built with a *different* embedder (fingerprint
+mismatch), the daemon logs it, rolls that repository to a fresh generation, and
+clears its file view so the next reconcile reindexes everything — search is
+transiently empty until reindexed, and the daemon never wedges on one stale
+repository.
 
 ## Lifecycle
 
@@ -124,9 +130,14 @@ v1 inert.
 - **Host-global embedder only.** Every repository is indexed with the
   `daemon.json` embedder; honoring each repository's own embedder config is a
   planned refinement.
-- **No runtime catalog quarantine.** A catalog that starts erroring *after* it
-  was opened is not yet auto-removed from the scheduler's aggregate view
-  (open-time rejection of a corrupt/too-new catalog is in place).
+- **Quarantine is skip-based, not eviction-based.** A catalog that errors after
+  open is skipped (and logged) by the scheduler's aggregate reads so healthy
+  repos keep indexing; it is not yet fully evicted from the live set (open-time
+  rejection of a corrupt/too-new catalog is in place).
+- **Dead-letter accounting in `grepai watch` is host-wide**, so a concurrent
+  failure in another repo can be attributed to the watched repo's summary line.
+  `watch` always exits 0 once the index is fresh; failed files are reported as a
+  warning, not an exit code.
 - **Trace/symbols, RPG refresh, and generation-scoped controlled rebuild** are
   not served by the daemon yet.
 - **Linux only** for the daemon process paths (flock + detached spawn).

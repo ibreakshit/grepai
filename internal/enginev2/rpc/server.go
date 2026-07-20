@@ -64,11 +64,12 @@ func dispatch(ctx context.Context, h service.Service, frame []byte) (resp Respon
 	if req.JSONRPC != Version || req.Method == "" {
 		return errResp(req.ID, CodeInvalidRequest, "invalid request", nil), req.ID == nil
 	}
-	// Recover a handler panic into an internal error rather than killing the conn.
+	// Recover a handler panic into an internal error rather than killing the
+	// conn. A panicking NOTIFICATION stays silent (no id to reply to).
 	defer func() {
 		if p := recover(); p != nil {
 			resp = errResp(req.ID, CodeInternal, "internal error", fmt.Errorf("panic: %v", p))
-			notification = false
+			notification = req.ID == nil
 		}
 	}()
 

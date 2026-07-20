@@ -30,11 +30,16 @@ func daemonSocket(cfg *config.Config) (string, error) {
 
 // ensureDaemonClient connects to the daemon, lazily starting grepaid if needed.
 // A failure to start/reach the daemon is returned loudly — under engine:v2 there
-// is no silent v1 fallback.
+// is no silent v1 fallback. Dial-first: a healthy running daemon is usable even
+// if the grepaid binary has since been moved; the binary is located only when a
+// spawn is actually needed.
 func ensureDaemonClient(ctx context.Context, cfg *config.Config) (*rpc.Client, error) {
 	socket, err := daemonSocket(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if c, derr := rpc.Dial(socket); derr == nil {
+		return c, nil
 	}
 	bin, err := daemonctl.LocateBinary()
 	if err != nil {

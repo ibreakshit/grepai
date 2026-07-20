@@ -437,8 +437,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	// engine:v2 routes to the daemon (v1 inert); loud on failure, no fallback.
-	if cfg, v2 := repoEngineV2(); v2 {
-		return runStatusDaemon(cmd, cfg)
+	cfg2, v2, gerr := repoEngineV2()
+	if gerr != nil {
+		return gerr
+	}
+	if v2 {
+		return runStatusDaemon(cmd, cfg2)
 	}
 
 	// Find project root

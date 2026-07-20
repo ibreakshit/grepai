@@ -112,8 +112,12 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	}
 
 	// engine:v2 routes to the daemon (v1 per-repo watcher is inert); loud on failure.
-	if cfg, v2 := repoEngineV2(); v2 {
-		return runWatchDaemon(cmd, cfg)
+	cfg2, v2, gerr := repoEngineV2()
+	if gerr != nil {
+		return gerr
+	}
+	if v2 {
+		return runWatchDaemon(cmd, cfg2)
 	}
 
 	// Determine log directory

@@ -19,8 +19,8 @@ func TestRepoEngineV2RoutingDetection(t *testing.T) {
 	if err := cfg.Save(dir); err != nil {
 		t.Fatalf("save v2: %v", err)
 	}
-	if _, v2 := repoEngineV2(); !v2 {
-		t.Fatal("engine:v2 config must route to the daemon path")
+	if _, v2, err := repoEngineV2(); err != nil || !v2 {
+		t.Fatalf("engine:v2 config must route to the daemon path (v2=%v err=%v)", v2, err)
 	}
 
 	// engine: v1 -> v1 path (no daemon).
@@ -28,8 +28,8 @@ func TestRepoEngineV2RoutingDetection(t *testing.T) {
 	if err := cfg.Save(dir); err != nil {
 		t.Fatalf("save v1: %v", err)
 	}
-	if _, v2 := repoEngineV2(); v2 {
-		t.Fatal("engine:v1 must NOT route to the daemon path")
+	if _, v2, err := repoEngineV2(); err != nil || v2 {
+		t.Fatalf("engine:v1 must NOT route to the daemon path (v2=%v err=%v)", v2, err)
 	}
 
 	// unset engine -> v1 default (no daemon).
@@ -37,8 +37,8 @@ func TestRepoEngineV2RoutingDetection(t *testing.T) {
 	if err := cfg.Save(dir); err != nil {
 		t.Fatalf("save default: %v", err)
 	}
-	if _, v2 := repoEngineV2(); v2 {
-		t.Fatal("unset engine must default to v1 (no daemon)")
+	if _, v2, err := repoEngineV2(); err != nil || v2 {
+		t.Fatalf("unset engine must default to v1, no daemon (v2=%v err=%v)", v2, err)
 	}
 }
 

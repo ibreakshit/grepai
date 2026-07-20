@@ -152,6 +152,16 @@ func (s *Set) CurrentJob(ctx context.Context, wt core.WorktreeID, relPath string
 	return c.CurrentJob(ctx, wt, relPath)
 }
 
+// ClearWorktreeState is beyond the strict interface union; the daemon's
+// fingerprint rollover uses it. Routed by worktree.
+func (s *Set) ClearWorktreeState(ctx context.Context, wt core.WorktreeID) error {
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return err
+	}
+	return c.ClearWorktreeState(ctx, wt)
+}
+
 func (s *Set) WorktreeIndexedHashes(ctx context.Context, wt core.WorktreeID) (map[string]string, error) {
 	c, err := s.getByWT(wt)
 	if err != nil {
@@ -205,14 +215,22 @@ func (s *Set) GetArtifact(ctx context.Context, key core.ArtifactKey) (core.Artif
 }
 
 // --- fan-out aggregates ---
+//
+// Aggregates SKIP a member whose read fails (reporting it via OnAggregateError)
+// rather than failing the whole call: the scheduler consults these before every
+// claim, so one broken catalog must not stall indexing for every healthy repo
+// (quarantine-lite; the spec's Phase B obligation). Results are best-effort
+// partial when a member errors. snapshot() returns members sorted by repo id —
+// the scheduler's round-robin resume point assumes ascending order.
 
 func (s *Set) RepositoriesWithPendingJobs(ctx context.Context) ([]core.RepositoryID, error) {
 	var out []core.RepositoryID
 	seen := map[core.RepositoryID]bool{}
-	for _, c := range s.snapshot() {
-		repos, err := c.RepositoriesWithPendingJobs(ctx)
+	for _, m := range s.snapshot() {
+		repos, err := m.cat.RepositoriesWithPendingJobs(ctx)
 		if err != nil {
-			return nil, err
+			s.reportErr(m.repo, err)
+			continue
 		}
 		for _, r := range repos {
 			if !seen[r] {
@@ -226,12 +244,13 @@ func (s *Set) RepositoriesWithPendingJobs(ctx context.Context) ([]core.Repositor
 
 func (s *Set) QueueDepthByPriority(ctx context.Context) (map[core.Priority]int, error) {
 	out := map[core.Priority]int{}
-	for _, c := range s.snapshot() {
-		m, err := c.QueueDepthByPriority(ctx)
+	for _, m := range s.snapshot() {
+		depths, err := m.cat.QueueDepthByPriority(ctx)
 		if err != nil {
-			return nil, err
+			s.reportErr(m.repo, err)
+			continue
 		}
-		for p, n := range m {
+		for p, n := range depths {
 			out[p] += n
 		}
 	}
@@ -240,10 +259,11 @@ func (s *Set) QueueDepthByPriority(ctx context.Context) (map[core.Priority]int, 
 
 func (s *Set) DeadLetterCount(ctx context.Context) (int, error) {
 	total := 0
-	for _, c := range s.snapshot() {
-		n, err := c.DeadLetterCount(ctx)
+	for _, m := range s.snapshot() {
+		n, err := m.cat.DeadLetterCount(ctx)
 		if err != nil {
-			return 0, err
+			s.reportErr(m.repo, err)
+			continue
 		}
 		total += n
 	}
@@ -252,10 +272,11 @@ func (s *Set) DeadLetterCount(ctx context.Context) (int, error) {
 
 func (s *Set) RequeueClaimedJobs(ctx context.Context) (int, error) {
 	total := 0
-	for _, c := range s.snapshot() {
-		n, err := c.RequeueClaimedJobs(ctx)
+	for _, m := range s.snapshot() {
+		n, err := m.cat.RequeueClaimedJobs(ctx)
 		if err != nil {
-			return 0, err
+			s.reportErr(m.repo, err)
+			continue
 		}
 		total += n
 	}
@@ -266,13 +287,12 @@ func (s *Set) RequeueClaimedJobs(ctx context.Context) (int, error) {
 // The daemon's scheduler claims per-repo via ClaimNextJobInRepo, so this is
 // never called in the daemon path; implemented as a first-non-empty fan-out.
 //
-// WARNING: do NOT drive a worker.Worker.Run loop with a Set. This fan-out uses
-// nondeterministic map order (no fairness — a perpetually busy catalog can
-// starve the rest) and fails on the first catalog error. The scheduler is the
-// only supported multi-repo drainer.
+// WARNING: do NOT drive a worker.Worker.Run loop with a Set. This fan-out has
+// no cross-repo fairness (a perpetually busy catalog starves the rest). The
+// scheduler is the only supported multi-repo drainer.
 func (s *Set) ClaimNextJob(ctx context.Context, minPriority core.Priority) (core.Job, bool, error) {
-	for _, c := range s.snapshot() {
-		job, ok, err := c.ClaimNextJob(ctx, minPriority)
+	for _, m := range s.snapshot() {
+		job, ok, err := m.cat.ClaimNextJob(ctx, minPriority)
 		if err != nil {
 			return core.Job{}, false, err
 		}

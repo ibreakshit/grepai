@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/artifacts"
@@ -34,6 +35,7 @@ type Set struct {
 	mu    sync.RWMutex
 	cats  map[core.RepositoryID]*sqlite.Catalog
 	wtToR map[core.WorktreeID]core.RepositoryID
+	onErr func(repo core.RepositoryID, err error)
 }
 
 // New returns an empty Set.
@@ -41,6 +43,19 @@ func New() *Set {
 	return &Set{
 		cats:  make(map[core.RepositoryID]*sqlite.Catalog),
 		wtToR: make(map[core.WorktreeID]core.RepositoryID),
+	}
+}
+
+// OnAggregateError installs a hook called when a fan-out aggregate skips a
+// failing catalog (quarantine-lite: one broken catalog must not stall the
+// host-wide scheduler — see the spec's Phase B obligations). Call before
+// serving; not synchronized with concurrent aggregate calls.
+func (s *Set) OnAggregateError(fn func(repo core.RepositoryID, err error)) { s.onErr = fn }
+
+// reportErr invokes the aggregate-error hook if installed.
+func (s *Set) reportErr(repo core.RepositoryID, err error) {
+	if s.onErr != nil {
+		s.onErr(repo, err)
 	}
 }
 
@@ -128,14 +143,22 @@ func (s *Set) getByWT(wt core.WorktreeID) (*sqlite.Catalog, error) {
 	return s.get(repo)
 }
 
-// snapshot returns the current catalogs for fan-out reads without holding the
-// lock during delegation.
-func (s *Set) snapshot() []*sqlite.Catalog {
+// member pairs a repo id with its open catalog for fan-out iteration.
+type member struct {
+	repo core.RepositoryID
+	cat  *sqlite.Catalog
+}
+
+// snapshot returns the current members, sorted by repo id, for fan-out reads
+// without holding the lock during delegation. Sorted order matters: the
+// scheduler's round-robin resume point assumes ascending repo order.
+func (s *Set) snapshot() []member {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*sqlite.Catalog, 0, len(s.cats))
-	for _, c := range s.cats {
-		out = append(out, c)
+	out := make([]member, 0, len(s.cats))
+	for repo, c := range s.cats {
+		out = append(out, member{repo: repo, cat: c})
 	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].repo < out[j].repo })
 	return out
 }

@@ -12,6 +12,10 @@ import (
 // cannot force an unbounded allocation.
 const maxFrameBytes = 64 << 20 // 64 MiB
 
+// maxHeaderLine bounds a single header line so an endless unterminated header
+// cannot buffer unbounded memory.
+const maxHeaderLine = 4 << 10 // 4 KiB
+
 // writeFrame writes payload with an LSP-style Content-Length header.
 func writeFrame(w io.Writer, payload []byte) error {
 	if _, err := fmt.Fprintf(w, "Content-Length: %d\r\n\r\n", len(payload)); err != nil {
@@ -33,6 +37,9 @@ func readFrame(r *bufio.Reader) ([]byte, error) {
 				return nil, io.EOF
 			}
 			return nil, err
+		}
+		if len(line) > maxHeaderLine {
+			return nil, fmt.Errorf("rpc: header line too long (%d bytes)", len(line))
 		}
 		first = false
 		trimmed := strings.TrimRight(line, "\r\n")

@@ -35,6 +35,10 @@ type ReconcileResponse struct {
 type SearchRequest struct {
 	WorktreeID core.WorktreeID
 	Query      string
+	// Limit caps returned results; <=0 uses the server default.
+	Limit int
+	// PathPrefix restricts results to paths under the given prefix ("" = all).
+	PathPrefix string
 }
 
 // SearchResponse carries worktree-scoped ranked results plus freshness metadata.

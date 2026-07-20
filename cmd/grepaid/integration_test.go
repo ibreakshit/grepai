@@ -178,13 +178,18 @@ func TestFingerprintRolloverOnRestart(t *testing.T) {
 	cancel1()
 	<-done1
 
-	// Second run: a DIFFERENT chunking → different fingerprint. On rehydrate the
-	// repo's active generation fingerprint mismatches, so it must roll forward.
+	// Second run: a DIFFERENT-DIMENSION embedder (4 -> 8) — the harshest
+	// mismatch: the fingerprint changes AND every stored vector is dimensionally
+	// incompatible with new query embeddings. Without the rollover clearing the
+	// worktree view, reconcile would see the old hashes and queue NOTHING, and
+	// search would be permanently empty while reporting fresh (the exact failure
+	// the merge-gate review demonstrated against the naive roll).
 	cfg2 := testConfig()
-	cfg2.Chunking = daemoncfg.ChunkingConfig{Size: 256, Overlap: 32} // changes the fingerprint
+	dims8 := 8
+	cfg2.Embedder.Dimensions = &dims8
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	done2 := make(chan error, 1)
-	go func() { done2 <- runWithEmbedder(ctx2, p, cfg2, enginetest.NewFakeEmbedder(4), os.Stderr) }()
+	go func() { done2 <- runWithEmbedder(ctx2, p, cfg2, enginetest.NewFakeEmbedder(8), os.Stderr) }()
 	defer func() { cancel2(); <-done2 }()
 	c2 := dialWithRetry(t, p.Socket, 3*time.Second)
 	defer c2.Close()
@@ -195,9 +200,14 @@ func TestFingerprintRolloverOnRestart(t *testing.T) {
 	if st2.ActiveGeneration <= st1.ActiveGeneration {
 		t.Fatalf("expected generation to roll forward from %d, got %d", st1.ActiveGeneration, st2.ActiveGeneration)
 	}
-	// Reconcile + reindex under the new generation, then search works.
-	if _, err := c2.Reconcile(context.Background(), service.ReconcileRequest{WorktreeID: reg.WorktreeID}); err != nil {
+	// The roll must have cleared the view: reconcile re-desires EVERY file (a
+	// naive roll would queue zero because the old hashes still look indexed).
+	rec, err := c2.Reconcile(context.Background(), service.ReconcileRequest{WorktreeID: reg.WorktreeID})
+	if err != nil {
 		t.Fatalf("Reconcile after roll: %v", err)
+	}
+	if rec.JobsQueued == 0 {
+		t.Fatal("rollover did not force a reindex: reconcile after fingerprint roll queued 0 jobs")
 	}
 	waitFresh(t, c2, reg.WorktreeID, 5*time.Second)
 	res, err := c2.Search(context.Background(), service.SearchRequest{WorktreeID: reg.WorktreeID, Query: "content"})
@@ -205,7 +215,7 @@ func TestFingerprintRolloverOnRestart(t *testing.T) {
 		t.Fatalf("Search after roll: %v", err)
 	}
 	if len(res.Results) == 0 {
-		t.Fatal("search returned nothing after fingerprint roll + reindex")
+		t.Fatal("search returned nothing after fingerprint roll + reindex (8-dim query against a properly reindexed view must hit)")
 	}
 }
 

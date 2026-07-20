@@ -5,6 +5,7 @@ package daemonctl
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -26,7 +27,7 @@ func EnsureDaemon(ctx context.Context, socket, binPath string, timeout time.Dura
 	} else if !errors.Is(err, rpc.ErrDaemonDown) {
 		return nil, err
 	}
-	if err := spawnDetached(binPath); err != nil {
+	if err := spawnDetached(binPath, socket); err != nil {
 		return nil, err
 	}
 	deadline := time.Now().Add(timeout)
@@ -46,10 +47,14 @@ func EnsureDaemon(ctx context.Context, socket, binPath string, timeout time.Dura
 }
 
 // spawnDetached starts grepaid in its own session so it outlives this process.
-func spawnDetached(binPath string) error {
+// The socket the CLIENT is about to poll is passed explicitly via GREPAID_SOCKET
+// so the daemon binds the exact same path — a per-repo daemon.socket override
+// would otherwise apply only client-side and the two would never meet.
+func spawnDetached(binPath, socket string) error {
 	cmd := exec.Command(binPath) // #nosec G204 - fixed daemon binary path resolved by the caller
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	cmd.Env = append(os.Environ(), "GREPAID_SOCKET="+socket)
 	if err := cmd.Start(); err != nil {
 		return err
 	}

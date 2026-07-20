@@ -73,6 +73,14 @@ func StopDaemon(lockPath string, timeout time.Duration) error {
 	if pid <= 0 {
 		return errors.New("grepaid: running but pid unknown")
 	}
+	// Guard against pid reuse: only signal a process that actually looks like
+	// grepaid (Linux: /proc/<pid>/comm). If comm is unreadable, proceed — the
+	// flock being held is strong evidence the pid is live and ours.
+	if comm, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm"); err == nil { // #nosec G304 - fixed /proc path
+		if !strings.Contains(strings.TrimSpace(string(comm)), "grepaid") {
+			return errors.New("grepaid: lock-file pid " + strconv.Itoa(pid) + " is not a grepaid process (pid reuse?); not signaling")
+		}
+	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
@@ -98,7 +99,9 @@ func (s *Server) Reconcile(ctx context.Context, req ReconcileRequest) (Reconcile
 }
 
 // Search embeds the query once and ranks the worktree's active-view chunks. It
-// enqueues no work.
+// enqueues no work. Limit<=0 uses the server default; PathPrefix filters hits
+// to paths under the prefix (the catalog is over-fetched when filtering so a
+// narrow prefix still fills the limit).
 func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	q, err := s.emb.Embed(ctx, req.Query)
 	if err != nil {
@@ -107,9 +110,34 @@ func (s *Server) Search(ctx context.Context, req SearchRequest) (SearchResponse,
 	if err := validateQueryVector(q, s.emb.Dimensions()); err != nil {
 		return SearchResponse{}, err
 	}
-	hits, err := s.cat.SearchWorktree(ctx, req.WorktreeID, q, s.limit)
+	limit := req.Limit
+	if limit <= 0 {
+		limit = s.limit
+	}
+	fetch := limit
+	if req.PathPrefix != "" {
+		// Over-fetch so post-filtering can still fill the limit; bounded to keep
+		// a hostile prefix from forcing an unbounded scan.
+		fetch = limit * 20
+		if fetch > 2000 {
+			fetch = 2000
+		}
+	}
+	hits, err := s.cat.SearchWorktree(ctx, req.WorktreeID, q, fetch)
 	if err != nil {
 		return SearchResponse{}, err
+	}
+	if req.PathPrefix != "" {
+		filtered := hits[:0]
+		for _, h := range hits {
+			if strings.HasPrefix(h.Path, req.PathPrefix) {
+				filtered = append(filtered, h)
+			}
+		}
+		hits = filtered
+	}
+	if len(hits) > limit {
+		hits = hits[:limit]
 	}
 	gen, pending, err := s.genAndPending(ctx, req.WorktreeID)
 	if err != nil {

@@ -28,12 +28,17 @@ func daemonMain() error {
 	if err != nil {
 		return err
 	}
-	if err := paths.EnsureDirs(); err != nil {
-		return err
-	}
-
 	cfg, existed, err := daemoncfg.Load(paths.Config)
 	if err != nil {
+		return err
+	}
+	// A socket in daemon.json overrides the XDG default, unless GREPAID_SOCKET
+	// (which ResolvePaths already honored) is set. Applied BEFORE EnsureDirs so
+	// the custom socket's parent directory is the one created.
+	if cfg.Socket != "" && os.Getenv("GREPAID_SOCKET") == "" {
+		paths.Socket = cfg.Socket
+	}
+	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
 	if !existed {
@@ -41,11 +46,6 @@ func daemonMain() error {
 		if err := cfg.Save(paths.Config); err != nil {
 			return err
 		}
-	}
-	// A socket in daemon.json overrides the XDG default, unless GREPAID_SOCKET
-	// (which ResolvePaths already honored) is set.
-	if cfg.Socket != "" && os.Getenv("GREPAID_SOCKET") == "" {
-		paths.Socket = cfg.Socket
 	}
 
 	// The flock is the authoritative liveness signal. A lazy-start race loser

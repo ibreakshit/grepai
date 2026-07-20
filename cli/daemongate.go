@@ -15,18 +15,19 @@ import (
 )
 
 // repoEngineV2 loads the current repo's config and reports whether it is
-// configured for the v2 daemon engine. A missing config/root is treated as v1
-// (the default), so v1 repos never touch the daemon path.
-func repoEngineV2() (*config.Config, bool) {
+// configured for the v2 daemon engine. A missing project root is v1 (the
+// default — not a grepai repo yet), but a root whose config EXISTS and fails to
+// load is a hard error: a malformed engine:v2 config must not silently run v1.
+func repoEngineV2() (*config.Config, bool, error) {
 	root, err := config.FindProjectRoot()
 	if err != nil {
-		return nil, false
+		return nil, false, nil // no .grepai: plain v1 default
 	}
 	cfg, err := config.Load(root)
 	if err != nil {
-		return nil, false
+		return nil, false, fmt.Errorf("load %s config: %w", root, err)
 	}
-	return cfg, cfg.EngineV2()
+	return cfg, cfg.EngineV2(), nil
 }
 
 // warnIfV1WatcherRunning prints a gentle stderr note when a live v1 watcher is
@@ -43,12 +44,12 @@ func warnIfV1WatcherRunning(cmd *cobra.Command) {
 	if err != nil {
 		return
 	}
+	// Only the per-repo worktree pidfile identifies THIS repo's watcher; the
+	// legacy global pidfile is shared across non-git repos and would produce
+	// false positives, so it is not consulted.
 	pid := 0
 	if info, derr := git.Detect(root); derr == nil && info.WorktreeID != "" {
 		pid, _ = daemon.GetRunningWorktreePID(logDir, info.WorktreeID)
-	}
-	if pid == 0 {
-		pid, _ = daemon.GetRunningPID(logDir)
 	}
 	if pid > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(),
@@ -60,8 +61,11 @@ func warnIfV1WatcherRunning(cmd *cobra.Command) {
 // runSearchDaemon serves a top-level `grepai search` against the daemon (engine:v2).
 // It fails loudly on any daemon/embedder error — there is no silent v1 fallback.
 func runSearchDaemon(cmd *cobra.Command, args []string, cfg *config.Config) error {
-	if searchWorkspace != "" {
-		return fmt.Errorf("workspace search is not supported under engine: v2")
+	if searchWorkspace != "" || len(searchProjects) > 0 {
+		return fmt.Errorf("workspace/project search is not supported under engine: v2")
+	}
+	if searchTOON {
+		return fmt.Errorf("--toon output is not supported under engine: v2 (use --json)")
 	}
 	warnIfV1WatcherRunning(cmd)
 	ctx := context.Background()
@@ -74,12 +78,20 @@ func runSearchDaemon(cmd *cobra.Command, args []string, cfg *config.Config) erro
 	if err != nil {
 		return err
 	}
-	resp, err := client.Search(ctx, service.SearchRequest{WorktreeID: wt, Query: strings.Join(args, " ")})
+	resp, err := client.Search(ctx, service.SearchRequest{
+		WorktreeID: wt,
+		Query:      strings.Join(args, " "),
+		Limit:      searchLimit,
+		PathPrefix: searchPath,
+	})
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
 	if !resp.Fresh {
 		fmt.Fprintln(cmd.ErrOrStderr(), "note: index may be stale; run `grepai watch` to reconcile")
+	}
+	if len(resp.Results) == 0 && resp.Fresh {
+		fmt.Fprintln(cmd.ErrOrStderr(), "note: no results on a fresh index — if this repo was just registered the index may still be empty; run `grepai watch`")
 	}
 	if searchJSON {
 		if searchCompact {
@@ -94,9 +106,6 @@ func runSearchDaemon(cmd *cobra.Command, args []string, cfg *config.Config) erro
 			out = append(out, SearchResultJSON{FilePath: h.Path, StartLine: h.StartLine, EndLine: h.EndLine, Score: h.Score, Content: h.Content})
 		}
 		return encodeJSON(cmd, out)
-	}
-	if searchTOON {
-		fmt.Fprintln(cmd.ErrOrStderr(), "note: --toon is not supported under engine: v2; showing plain output")
 	}
 	for _, h := range resp.Results {
 		fmt.Fprintf(cmd.OutOrStdout(), "%s:%d-%d  (%.3f)\n", h.Path, h.StartLine, h.EndLine, h.Score)
@@ -155,6 +164,14 @@ func runWatchDaemon(cmd *cobra.Command, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	// Dead-letter baseline is captured BEFORE reconcile so a fast permanent
+	// failure right after enqueue is still attributed to this run. (The count is
+	// host-wide this release, so failures in another repo during the wait can be
+	// over-attributed — a scoped count is a documented follow-up.)
+	dlStart := 0
+	if st, serr := client.Status(ctx, service.StatusRequest{WorktreeID: wt}); serr == nil {
+		dlStart = st.DeadLetters
+	}
 	resp, err := client.Reconcile(ctx, service.ReconcileRequest{WorktreeID: wt})
 	if err != nil {
 		return fmt.Errorf("reconcile: %w", err)
@@ -164,13 +181,10 @@ func runWatchDaemon(cmd *cobra.Command, cfg *config.Config) error {
 	}
 	// Wait until fresh with no fixed deadline: a large first index legitimately
 	// takes long, and every queued job terminally resolves (commit, supersede, or
-	// dead-letter after bounded retries), so pending always reaches zero — this
-	// loop cannot hang forever. Progress is printed only when the count changes.
+	// dead-letter after bounded retries), so pending reaches zero as long as the
+	// daemon is serving. Progress is printed only when the count changes; Ctrl-C
+	// is always safe (indexing continues daemon-side).
 	lastPending := -1
-	dlStart := 0
-	if st, serr := client.Status(ctx, service.StatusRequest{WorktreeID: wt}); serr == nil {
-		dlStart = st.DeadLetters
-	}
 	for {
 		st, err := client.Status(ctx, service.StatusRequest{WorktreeID: wt})
 		if err != nil {
