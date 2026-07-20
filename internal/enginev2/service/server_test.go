@@ -269,14 +269,22 @@ func TestTraceCallersCalleesAndGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !callers.Served {
-		t.Fatal("a trace-capable server must set the Served capability marker (old-daemon detection depends on it)")
+	if !callers.Served || callers.Protocol != service.TraceProtocolCurrent {
+		t.Fatalf("server must stamp Served + current trace protocol (old-daemon detection depends on it): %+v", callers)
 	}
 	if len(callers.Definitions) != 1 || callers.Definitions[0].Path != "b.go" {
 		t.Fatalf("Validate definitions wrong: %+v", callers.Definitions)
 	}
 	if len(callers.Edges) != 1 || callers.Edges[0].Caller != "HandleReq" || callers.Edges[0].Path != "a.go" {
 		t.Fatalf("callers wrong: %+v", callers.Edges)
+	}
+	// Related resolves edge endpoints server-side (v1-parity assembly needs
+	// the caller's own definition without extra round trips).
+	if defs, ok := callers.Related["HandleReq"]; !ok || len(defs) != 1 || defs[0].Path != "a.go" {
+		t.Fatalf("Related must resolve HandleReq's definition: %+v", callers.Related)
+	}
+	if _, ok := callers.Related["Validate"]; ok {
+		t.Fatalf("Related must not duplicate the queried symbol: %+v", callers.Related)
 	}
 	callees, err := s.Trace(ctx, service.TraceRequest{WorktreeID: "w", Symbol: "Validate", Direction: service.TraceCallees})
 	if err != nil {

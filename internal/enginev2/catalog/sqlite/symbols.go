@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 )
@@ -41,7 +42,8 @@ func (c *Catalog) ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeI
 // scoping (a retired generation's artifacts are unreachable).
 func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name string) ([]core.SymbolAt, error) {
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT wf.relative_path, s.name, s.kind, s.line, s.end_line, s.signature
+		SELECT wf.relative_path, s.name, s.kind, s.line, s.end_line, s.signature,
+			s.receiver, s.package, s.exported, s.language, s.docstring
 		FROM worktree_files wf
 		JOIN symbols s ON s.artifact_id = wf.artifact_id
 		WHERE wf.worktree_id=? AND s.name=?
@@ -53,9 +55,12 @@ func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, nam
 	var out []core.SymbolAt
 	for rows.Next() {
 		var s core.SymbolAt
-		if err := rows.Scan(&s.Path, &s.Name, &s.Kind, &s.Line, &s.EndLine, &s.Signature); err != nil {
+		var exported int
+		if err := rows.Scan(&s.Path, &s.Name, &s.Kind, &s.Line, &s.EndLine, &s.Signature,
+			&s.Receiver, &s.Package, &exported, &s.Language, &s.Docstring); err != nil {
 			return nil, err
 		}
+		s.Exported = exported != 0
 		out = append(out, s)
 	}
 	return out, rows.Err()
@@ -66,13 +71,13 @@ func (c *Catalog) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, nam
 // callersOf=false returns edges WHERE caller=name (what it calls).
 func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error) {
 	const byCallee = `
-		SELECT e.caller, e.callee, wf.relative_path, e.line
+		SELECT e.caller, e.callee, wf.relative_path, e.line, e.context
 		FROM worktree_files wf
 		JOIN symbol_edges e ON e.artifact_id = wf.artifact_id
 		WHERE wf.worktree_id=? AND e.callee=?
 		ORDER BY wf.relative_path, e.line`
 	const byCaller = `
-		SELECT e.caller, e.callee, wf.relative_path, e.line
+		SELECT e.caller, e.callee, wf.relative_path, e.line, e.context
 		FROM worktree_files wf
 		JOIN symbol_edges e ON e.artifact_id = wf.artifact_id
 		WHERE wf.worktree_id=? AND e.caller=?
@@ -89,7 +94,7 @@ func (c *Catalog) SymbolEdges(ctx context.Context, wt core.WorktreeID, name stri
 	var out []core.EdgeAt
 	for rows.Next() {
 		var e core.EdgeAt
-		if err := rows.Scan(&e.Caller, &e.Callee, &e.Path, &e.Line); err != nil {
+		if err := rows.Scan(&e.Caller, &e.Callee, &e.Path, &e.Line, &e.Context); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -112,4 +117,55 @@ func (c *Catalog) ArtifactSymbolsCurrent(ctx context.Context, key core.ArtifactK
 		return false, err
 	}
 	return v >= SymbolsVersionCurrent, nil
+}
+
+// SymbolDefinitionsBulk resolves definitions for many names in one pass
+// (chunked IN-clause; SQLite's default variable limit is 999, so chunks stay
+// well under it). Names with no definitions are simply absent from the map.
+func (c *Catalog) SymbolDefinitionsBulk(ctx context.Context, wt core.WorktreeID, names []string) (map[string][]core.SymbolAt, error) {
+	out := map[string][]core.SymbolAt{}
+	const chunk = 500
+	for start := 0; start < len(names); start += chunk {
+		end := start + chunk
+		if end > len(names) {
+			end = len(names)
+		}
+		batch := names[start:end]
+		placeholders := strings.Repeat("?,", len(batch))
+		placeholders = placeholders[:len(placeholders)-1]
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, string(wt))
+		for _, n := range batch {
+			args = append(args, n)
+		}
+		//nolint:gosec // #nosec G202 - placeholders is "?,?..." built from Repeat; all values are bound parameters
+		query := `
+			SELECT wf.relative_path, s.name, s.kind, s.line, s.end_line, s.signature,
+				s.receiver, s.package, s.exported, s.language, s.docstring
+			FROM worktree_files wf
+			JOIN symbols s ON s.artifact_id = wf.artifact_id
+			WHERE wf.worktree_id=? AND s.name IN (` + placeholders + `)
+			ORDER BY s.name, wf.relative_path, s.line`
+		rows, err := c.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var s core.SymbolAt
+			var exported int
+			if err := rows.Scan(&s.Path, &s.Name, &s.Kind, &s.Line, &s.EndLine, &s.Signature,
+				&s.Receiver, &s.Package, &exported, &s.Language, &s.Docstring); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			s.Exported = exported != 0
+			out[s.Name] = append(out[s.Name], s)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }

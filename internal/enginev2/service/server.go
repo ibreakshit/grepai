@@ -40,6 +40,8 @@ type Catalog interface {
 	// ACTIVE view (isolation + generation scoping structural).
 	SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name string) ([]core.SymbolAt, error)
 	SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error)
+	// SymbolDefinitionsBulk resolves many names in one pass (Related assembly).
+	SymbolDefinitionsBulk(ctx context.Context, wt core.WorktreeID, names []string) (map[string][]core.SymbolAt, error)
 	// ArtifactsMissingSymbols sizes the symbol backfill still pending for wt.
 	ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) ([]core.MissingSymbolArtifact, error)
 }
@@ -261,7 +263,7 @@ func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, er
 	if dir == "" {
 		dir = TraceCallers
 	}
-	resp := TraceResponse{WorktreeID: req.WorktreeID, Served: true}
+	resp := TraceResponse{WorktreeID: req.WorktreeID, Served: true, Protocol: TraceProtocolCurrent}
 	defs, err := s.cat.SymbolDefinitions(ctx, req.WorktreeID, req.Symbol)
 	if err != nil {
 		return TraceResponse{}, err
@@ -290,6 +292,28 @@ func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, er
 		resp.Edges = edges
 	default:
 		return TraceResponse{}, fmt.Errorf("trace: unknown direction %q", dir)
+	}
+
+	// Resolve definitions for every distinct edge endpoint (v1-parity: the CLI
+	// mirrors v1's caller/callee symbol resolution and graph node table from
+	// these). Bounded by the edge caps above; the root's defs are already in
+	// Definitions and are not duplicated here.
+	if len(resp.Edges) > 0 {
+		seen := map[string]bool{req.Symbol: true}
+		var names []string
+		for _, e := range resp.Edges {
+			for _, n := range []string{e.Caller, e.Callee} {
+				if !seen[n] {
+					seen[n] = true
+					names = append(names, n)
+				}
+			}
+		}
+		related, derr := s.cat.SymbolDefinitionsBulk(ctx, req.WorktreeID, names)
+		if derr != nil {
+			return TraceResponse{}, derr
+		}
+		resp.Related = related
 	}
 
 	if missing, err := s.cat.ArtifactsMissingSymbols(ctx, req.WorktreeID); err == nil {

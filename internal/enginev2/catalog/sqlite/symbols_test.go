@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -184,5 +185,71 @@ func TestPutArtifactSymbolsReplaces(t *testing.T) {
 	}
 	if edges, _ := c.SymbolEdges(ctx, "w", "X", true); len(edges) != 0 {
 		t.Fatalf("stale edge survived replace: %+v", edges)
+	}
+}
+
+// TestV1ParityFieldsRoundTrip guards migration 0004: the extractor detail
+// fields (receiver/package/exported/language/docstring, edge context) must
+// survive commit → view read intact.
+func TestV1ParityFieldsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	c := openTestCatalog(t)
+	seedSymbolWorld(t, c, "r", "w", "a.go",
+		[]core.SymbolDef{{
+			Name: "Get", Kind: "method", Line: 10, EndLine: 20,
+			Signature: "func (s *Store) Get(k string) (string, error)",
+			Receiver:  "*Store", Package: "store", Exported: true,
+			Language: "go", Docstring: "Get returns the value for k.",
+		}},
+		[]core.SymbolEdge{{Caller: "Get", Callee: "lookup", Line: 12, Context: "\tv, err := lookup(k)"}}, true)
+
+	defs, err := c.SymbolDefinitions(ctx, "w", "Get")
+	if err != nil || len(defs) != 1 {
+		t.Fatalf("defs: %+v err=%v", defs, err)
+	}
+	d := defs[0]
+	if d.Receiver != "*Store" || d.Package != "store" || !d.Exported || d.Language != "go" ||
+		d.Docstring != "Get returns the value for k." {
+		t.Fatalf("v1-parity symbol fields lost: %+v", d)
+	}
+	edges, err := c.SymbolEdges(ctx, "w", "lookup", true)
+	if err != nil || len(edges) != 1 {
+		t.Fatalf("edges: %+v err=%v", edges, err)
+	}
+	if edges[0].Context != "\tv, err := lookup(k)" {
+		t.Fatalf("edge context lost: %+v", edges[0])
+	}
+}
+
+// TestSymbolDefinitionsBulk covers the Related bulk path: many names resolved
+// in one call, worktree-isolated, chunking exercised past one batch boundary.
+func TestSymbolDefinitionsBulk(t *testing.T) {
+	ctx := context.Background()
+	c := openTestCatalog(t)
+	var defs []core.SymbolDef
+	names := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
+		n := fmt.Sprintf("Fn%03d", i)
+		names = append(names, n)
+		defs = append(defs, core.SymbolDef{Name: n, Kind: "function", Line: i + 1})
+	}
+	seedSymbolWorld(t, c, "r", "w", "big.go", defs, nil, true)
+	seedSymbolWorld(t, c, "rb", "wb", "other.go", []core.SymbolDef{{Name: "Fn000", Kind: "function", Line: 9}}, nil, true)
+
+	got, err := c.SymbolDefinitionsBulk(ctx, "w", append(names, "Missing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 600 {
+		t.Fatalf("bulk resolved %d names, want 600", len(got))
+	}
+	if _, ok := got["Missing"]; ok {
+		t.Fatal("missing name must be absent, not empty")
+	}
+	if d := got["Fn000"]; len(d) != 1 || d[0].Path != "big.go" {
+		t.Fatalf("wb's Fn000 leaked into w or wrong path: %+v", d)
+	}
+	if empty, err := c.SymbolDefinitionsBulk(ctx, "w", nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty names must be a cheap no-op: %v %v", empty, err)
 	}
 }

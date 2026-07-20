@@ -495,6 +495,21 @@ func TestTraceEndToEnd(t *testing.T) {
 	if !foundDef || !foundCaller {
 		t.Fatalf("trace incomplete: defs=%+v edges=%+v", resp.Definitions, resp.Edges)
 	}
+	// v1-parity fields flow end-to-end: call-site context on the edge, the
+	// caller's own definition in Related, language on the definition.
+	for _, e := range resp.Edges {
+		if e.Caller == "HandleReq" && e.Callee == "Validate" && !strings.Contains(e.Context, "Validate(x)") {
+			t.Fatalf("edge context missing/wrong: %+v", e)
+		}
+	}
+	if defs, ok := resp.Related["HandleReq"]; !ok || len(defs) == 0 || defs[0].Path != "handler.go" {
+		t.Fatalf("Related must carry HandleReq's definition: %+v", resp.Related)
+	}
+	for _, d := range resp.Definitions {
+		if d.Name == "Validate" && d.Language != "go" {
+			t.Fatalf("definition language missing: %+v", d)
+		}
+	}
 	if resp.BackfillPending != 0 {
 		t.Fatalf("fresh daemon-built index should have no backfill pending, got %d", resp.BackfillPending)
 	}

@@ -82,6 +82,14 @@ const (
 	TraceGraph   = "graph"
 )
 
+// TraceProtocolCurrent is the trace response protocol generation. 2 = the
+// v1-parity surface (Related endpoint resolution, call-site Context, widened
+// symbol fields). The initial #9 daemon set only Served (protocol 0/1), so a
+// version-gated client can detect it and demand a restart instead of
+// rendering degraded output. Bump whenever the client REQUIRES new response
+// data to render correctly.
+const TraceProtocolCurrent = 2
+
 // TraceRequest issues a call-graph query within an explicit worktree view.
 // Direction is one of TraceCallers/TraceCallees/TraceGraph; Depth applies to
 // graph only (default 2, capped at 5).
@@ -97,15 +105,24 @@ type TraceRequest struct {
 // BackfillPending>0 means symbol coverage is still building for this worktree
 // (artifacts committed before extraction existed) — results may be incomplete.
 type TraceResponse struct {
-	WorktreeID      core.WorktreeID
-	Definitions     []core.SymbolAt
-	Edges           []core.EdgeAt
+	WorktreeID  core.WorktreeID
+	Definitions []core.SymbolAt
+	Edges       []core.EdgeAt
+	// Related maps every distinct edge endpoint name (other than the queried
+	// symbol) to its definitions in the same worktree view, so clients can
+	// resolve caller/callee symbols and graph nodes without extra round trips.
+	Related         map[string][]core.SymbolAt
 	BackfillPending int
 	// Served is the capability marker: a trace-capable daemon always sets it.
 	// Pre-trace daemons registered the method but answered inertly; their JSON
 	// decodes here with Served=false, which the CLI turns into a loud
 	// restart-the-daemon error instead of a silent false-negative "no symbols".
 	Served bool
+	// Protocol is TraceProtocolCurrent at the serving daemon. A daemon older
+	// than the client's required protocol (e.g. the initial #9 daemon, which
+	// sets Served but not Protocol) is rejected loudly instead of rendering
+	// degraded output from zero-valued fields.
+	Protocol int
 }
 
 // StatusRequest asks for indexing/freshness status.
