@@ -25,9 +25,11 @@ grepai init [flags]
 
 ```
   -b, --backend string    Storage backend (gob, postgres, or qdrant)
+      --engine string     Indexing engine: v1 (default, per-repo) or v2 (grepaid daemon)
   -h, --help              help for init
       --inherit           Inherit configuration from main worktree (for git worktrees)
-  -p, --provider string   Embedding provider (ollama, lmstudio, or openai)
+  -m, --model string      Embedding model (for openai/openrouter: text-embedding-3-small, text-embedding-3-large; openrouter also supports qwen3-embedding-4b)
+  -p, --provider string   Embedding provider (ollama, lmstudio, openai, synthetic, or openrouter)
       --ui                Run interactive Bubble Tea UI wizard
       --yes               Use defaults without prompting
 ```
