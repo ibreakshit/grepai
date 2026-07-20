@@ -2,9 +2,9 @@ package symbols
 
 import (
 	"context"
+	"testing"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
-	"testing"
 )
 
 const goFixture = `package demo

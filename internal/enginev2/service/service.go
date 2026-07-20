@@ -82,6 +82,14 @@ const (
 	TraceGraph   = "graph"
 )
 
+// TraceProtocolCurrent is the trace response protocol generation. 2 = the
+// v1-parity surface (Related endpoint resolution, call-site Context, widened
+// symbol fields). The initial #9 daemon set only Served (protocol 0/1), so a
+// version-gated client can detect it and demand a restart instead of
+// rendering degraded output. Bump whenever the client REQUIRES new response
+// data to render correctly.
+const TraceProtocolCurrent = 2
+
 // TraceRequest issues a call-graph query within an explicit worktree view.
 // Direction is one of TraceCallers/TraceCallees/TraceGraph; Depth applies to
 // graph only (default 2, capped at 5).
@@ -110,6 +118,11 @@ type TraceResponse struct {
 	// decodes here with Served=false, which the CLI turns into a loud
 	// restart-the-daemon error instead of a silent false-negative "no symbols".
 	Served bool
+	// Protocol is TraceProtocolCurrent at the serving daemon. A daemon older
+	// than the client's required protocol (e.g. the initial #9 daemon, which
+	// sets Served but not Protocol) is rejected loudly instead of rendering
+	// degraded output from zero-valued fields.
+	Protocol int
 }
 
 // StatusRequest asks for indexing/freshness status.

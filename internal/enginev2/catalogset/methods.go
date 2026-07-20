@@ -193,6 +193,14 @@ func (s *Set) SymbolDefinitions(ctx context.Context, wt core.WorktreeID, name st
 	return c.SymbolDefinitions(ctx, wt, name)
 }
 
+func (s *Set) SymbolDefinitionsBulk(ctx context.Context, wt core.WorktreeID, names []string) (map[string][]core.SymbolAt, error) {
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return nil, err
+	}
+	return c.SymbolDefinitionsBulk(ctx, wt, names)
+}
+
 // SymbolEdges resolves trace call edges through the worktree's view.
 func (s *Set) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error) {
 	c, err := s.getByWT(wt)

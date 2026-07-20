@@ -253,8 +253,8 @@ func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int) err
 	if err != nil {
 		return fmt.Errorf("trace: %w", err)
 	}
-	if !resp.Served {
-		return fmt.Errorf("the running grepaid daemon predates trace support (it answered inertly); restart it with `grepai daemon stop` — the next command auto-starts the new binary")
+	if !resp.Served || resp.Protocol < service.TraceProtocolCurrent {
+		return fmt.Errorf("the running grepaid daemon predates this trace protocol (got %d, need %d); restart it with `grepai daemon stop` — the next command auto-starts the new binary", resp.Protocol, service.TraceProtocolCurrent)
 	}
 	if resp.BackfillPending > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "note: symbol coverage still building (%d files pending backfill) — results may be incomplete\n", resp.BackfillPending)

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -217,5 +218,38 @@ func TestV1ParityFieldsRoundTrip(t *testing.T) {
 	}
 	if edges[0].Context != "\tv, err := lookup(k)" {
 		t.Fatalf("edge context lost: %+v", edges[0])
+	}
+}
+
+// TestSymbolDefinitionsBulk covers the Related bulk path: many names resolved
+// in one call, worktree-isolated, chunking exercised past one batch boundary.
+func TestSymbolDefinitionsBulk(t *testing.T) {
+	ctx := context.Background()
+	c := openTestCatalog(t)
+	var defs []core.SymbolDef
+	names := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
+		n := fmt.Sprintf("Fn%03d", i)
+		names = append(names, n)
+		defs = append(defs, core.SymbolDef{Name: n, Kind: "function", Line: i + 1})
+	}
+	seedSymbolWorld(t, c, "r", "w", "big.go", defs, nil, true)
+	seedSymbolWorld(t, c, "rb", "wb", "other.go", []core.SymbolDef{{Name: "Fn000", Kind: "function", Line: 9}}, nil, true)
+
+	got, err := c.SymbolDefinitionsBulk(ctx, "w", append(names, "Missing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 600 {
+		t.Fatalf("bulk resolved %d names, want 600", len(got))
+	}
+	if _, ok := got["Missing"]; ok {
+		t.Fatal("missing name must be absent, not empty")
+	}
+	if d := got["Fn000"]; len(d) != 1 || d[0].Path != "big.go" {
+		t.Fatalf("wb's Fn000 leaked into w or wrong path: %+v", d)
+	}
+	if empty, err := c.SymbolDefinitionsBulk(ctx, "w", nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty names must be a cheap no-op: %v %v", empty, err)
 	}
 }

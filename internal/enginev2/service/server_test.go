@@ -269,8 +269,8 @@ func TestTraceCallersCalleesAndGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !callers.Served {
-		t.Fatal("a trace-capable server must set the Served capability marker (old-daemon detection depends on it)")
+	if !callers.Served || callers.Protocol != service.TraceProtocolCurrent {
+		t.Fatalf("server must stamp Served + current trace protocol (old-daemon detection depends on it): %+v", callers)
 	}
 	if len(callers.Definitions) != 1 || callers.Definitions[0].Path != "b.go" {
 		t.Fatalf("Validate definitions wrong: %+v", callers.Definitions)
