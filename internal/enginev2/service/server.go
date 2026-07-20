@@ -30,6 +30,9 @@ type Catalog interface {
 	WorktreePathsPending(ctx context.Context, wt core.WorktreeID, paths []string) (bool, error)
 	DeadLetterCount(ctx context.Context) (int, error)
 	UpsertJob(ctx context.Context, job core.Job) error
+	// UpsertJobs enqueues a whole reconcile plan atomically: all or nothing, so
+	// a midway failure can never leave a partially queued plan behind.
+	UpsertJobs(ctx context.Context, jobs []core.Job) error
 }
 
 // Reconciler computes a worktree's convergence plan (satisfied by *reconcile.Engine).
@@ -83,17 +86,18 @@ func (s *Server) Register(ctx context.Context, req RegisterRequest) (RegisterRes
 	return RegisterResponse{RepositoryID: repo, WorktreeID: wt}, nil
 }
 
-// Reconcile computes the worktree's plan and durably enqueues it. This is an
-// administrative path — enqueueing jobs is expected (unlike query paths).
+// Reconcile computes the worktree's plan and durably enqueues it ATOMICALLY
+// (one transaction for the whole plan): an interrupted reconcile leaves either
+// every desired intent queued or none — never a partial plan that a later
+// retry could mistake for complete. This is an administrative path — enqueueing
+// jobs is expected (unlike query paths).
 func (s *Server) Reconcile(ctx context.Context, req ReconcileRequest) (ReconcileResponse, error) {
 	plan, err := s.rec.Reconcile(ctx, req.WorktreeID)
 	if err != nil {
 		return ReconcileResponse{}, err
 	}
-	for _, job := range plan.Jobs {
-		if err := s.cat.UpsertJob(ctx, job); err != nil {
-			return ReconcileResponse{}, err
-		}
+	if err := s.cat.UpsertJobs(ctx, plan.Jobs); err != nil {
+		return ReconcileResponse{}, err
 	}
 	return ReconcileResponse{JobsQueued: len(plan.Jobs)}, nil
 }

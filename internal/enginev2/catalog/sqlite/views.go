@@ -171,21 +171,46 @@ func (c *Catalog) DeleteWorktreeView(ctx context.Context, wt core.WorktreeID, re
 // same (worktree, path) only when the incoming generation is at least as new.
 func (c *Catalog) UpsertJob(ctx context.Context, job core.Job) error {
 	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO index_jobs(worktree_id, relative_path, desired_hash, generation, operation, priority, attempts, claimed, created_at)
-			VALUES(?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
-			ON CONFLICT(worktree_id, relative_path) DO UPDATE SET
-				desired_hash=excluded.desired_hash,
-				generation=excluded.generation,
-				operation=excluded.operation,
-				priority=excluded.priority,
-				attempts=excluded.attempts,
-				claimed=0
-			WHERE excluded.generation >= index_jobs.generation`,
-			string(job.WorktreeID), job.Path, job.DesiredHash, int64(job.Generation),
-			int(job.Operation), int(job.Priority), job.Attempts)
-		return err
+		return upsertJobTx(ctx, tx, job)
 	})
+}
+
+// UpsertJobs upserts a whole reconcile plan in ONE write transaction: either
+// every desired intent is durably queued or none is. This is what lets the
+// daemon's needs-reconcile predicate be an empty-view check — a partially
+// enqueued plan (some jobs committed, the rest lost to a midway failure) cannot
+// exist, so an interrupted reconcile leaves either nothing (retry re-plans) or
+// everything.
+func (c *Catalog) UpsertJobs(ctx context.Context, jobs []core.Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	return c.withWriteTx(ctx, func(tx *sql.Tx) error {
+		for _, job := range jobs {
+			if err := upsertJobTx(ctx, tx, job); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// upsertJobTx is the shared single-job upsert statement.
+func upsertJobTx(ctx context.Context, tx *sql.Tx, job core.Job) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO index_jobs(worktree_id, relative_path, desired_hash, generation, operation, priority, attempts, claimed, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))
+		ON CONFLICT(worktree_id, relative_path) DO UPDATE SET
+			desired_hash=excluded.desired_hash,
+			generation=excluded.generation,
+			operation=excluded.operation,
+			priority=excluded.priority,
+			attempts=excluded.attempts,
+			claimed=0
+		WHERE excluded.generation >= index_jobs.generation`,
+		string(job.WorktreeID), job.Path, job.DesiredHash, int64(job.Generation),
+		int(job.Operation), int(job.Priority), job.Attempts)
+	return err
 }
 
 // ClaimNextJob claims the highest-priority unclaimed job at or above

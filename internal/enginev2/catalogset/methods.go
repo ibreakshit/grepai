@@ -2,6 +2,7 @@ package catalogset
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/reconcile"
@@ -190,6 +191,26 @@ func (s *Set) UpsertJob(ctx context.Context, job core.Job) error {
 		return err
 	}
 	return c.UpsertJob(ctx, job)
+}
+
+// UpsertJobs routes an atomic whole-plan enqueue. A reconcile plan is always
+// for a single worktree; mixed-worktree batches are rejected (they could not be
+// atomic across separate per-repo catalogs).
+func (s *Set) UpsertJobs(ctx context.Context, jobs []core.Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	wt := jobs[0].WorktreeID
+	for _, j := range jobs[1:] {
+		if j.WorktreeID != wt {
+			return fmt.Errorf("catalogset: UpsertJobs batch spans worktrees %q and %q", wt, j.WorktreeID)
+		}
+	}
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return err
+	}
+	return c.UpsertJobs(ctx, jobs)
 }
 
 func (s *Set) DeadLetterJob(ctx context.Context, job core.Job, reason string) error {

@@ -102,6 +102,17 @@ func (c *FakeCatalog) UpsertJob(ctx context.Context, job core.Job) error {
 	return nil
 }
 
+// UpsertJobs enqueues a whole plan. The in-memory fake is trivially atomic
+// (single mutex, no partial-failure mode), so it simply applies each upsert.
+func (c *FakeCatalog) UpsertJobs(ctx context.Context, jobs []core.Job) error {
+	for _, job := range jobs {
+		if err := c.UpsertJob(ctx, job); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ClaimNextJob returns the highest-priority eligible job at or above
 // minPriority. Lower Priority value = higher priority.
 func (c *FakeCatalog) ClaimNextJob(ctx context.Context, minPriority core.Priority) (core.Job, bool, error) {
