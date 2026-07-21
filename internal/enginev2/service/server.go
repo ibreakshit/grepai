@@ -42,8 +42,9 @@ type Catalog interface {
 	SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error)
 	// SymbolDefinitionsBulk resolves many names in one pass (Related assembly).
 	SymbolDefinitionsBulk(ctx context.Context, wt core.WorktreeID, names []string) (map[string][]core.SymbolAt, error)
-	// ArtifactsMissingSymbols sizes the symbol backfill still pending for wt.
-	ArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) ([]core.MissingSymbolArtifact, error)
+	// CountArtifactsMissingSymbols sizes the symbol backfill still pending for
+	// wt (count-only: Status sits on a hot polling path).
+	CountArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) (int, error)
 }
 
 // Reconciler computes a worktree's convergence plan (satisfied by *reconcile.Engine).
@@ -316,9 +317,11 @@ func (s *Server) Trace(ctx context.Context, req TraceRequest) (TraceResponse, er
 		resp.Related = related
 	}
 
-	if missing, err := s.cat.ArtifactsMissingSymbols(ctx, req.WorktreeID); err == nil {
-		resp.BackfillPending = len(missing)
+	missing, merr := s.cat.CountArtifactsMissingSymbols(ctx, req.WorktreeID)
+	if merr != nil {
+		return TraceResponse{}, merr
 	}
+	resp.BackfillPending = missing
 	return resp, nil
 }
 
@@ -389,7 +392,13 @@ func (s *Server) Status(ctx context.Context, req StatusRequest) (StatusResponse,
 	if err != nil {
 		return StatusResponse{}, err
 	}
-	return StatusResponse{ActiveGeneration: gen, Pending: pending, Fresh: pending == 0, DeadLetters: dl}, nil
+	resp := StatusResponse{ActiveGeneration: gen, Pending: pending, Fresh: pending == 0, DeadLetters: dl}
+	missing, err := s.cat.CountArtifactsMissingSymbols(ctx, req.WorktreeID)
+	if err != nil {
+		return StatusResponse{}, err
+	}
+	resp.SymbolsBackfillPending = &missing
+	return resp, nil
 }
 
 // WaitFresh blocks until none of the requested paths has a pending job, or the

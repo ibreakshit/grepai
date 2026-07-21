@@ -1,4 +1,4 @@
-package cli
+package daemonctl
 
 import (
 	"path/filepath"
@@ -10,9 +10,9 @@ func TestDaemonSocketPrecedence(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	t.Setenv("GREPAID_SOCKET", "/tmp/env.sock")
-	got, err := daemonSocket()
+	got, err := Socket()
 	if err != nil {
-		t.Fatalf("daemonSocket: %v", err)
+		t.Fatalf("Socket: %v", err)
 	}
 	if got != "/tmp/env.sock" {
 		t.Fatalf("env should win: got %q", got)
@@ -24,9 +24,9 @@ func TestDaemonSocketFallsBackToHostDefault(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("GREPAID_SOCKET", "")
 	t.Setenv("XDG_RUNTIME_DIR", "")
-	got, err := daemonSocket()
+	got, err := Socket()
 	if err != nil {
-		t.Fatalf("daemonSocket: %v", err)
+		t.Fatalf("Socket: %v", err)
 	}
 	want := filepath.Join(state, "grepai", "grepaid.sock")
 	if got != want {

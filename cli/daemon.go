@@ -54,7 +54,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	socket, err := daemonSocket()
+	socket, err := daemonctl.Socket()
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func runDaemonStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	socket, err := daemonSocket()
+	socket, err := daemonctl.Socket()
 	if err != nil {
 		return err
 	}

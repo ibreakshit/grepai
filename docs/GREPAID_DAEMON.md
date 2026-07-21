@@ -158,8 +158,13 @@ v1 inert.
   by a pre-trace binary are backfilled automatically on daemon start (CPU-only,
   one repo at a time host-wide, no re-embedding); until backfill completes,
   trace prints a "coverage still building" note with the pending file count.
-- **RPG refresh, MCP, and generation-scoped controlled rebuild** are not served
-  by the daemon yet; `grepai mcp-serve` refuses to start (loudly) for an
-  engine:v2 repo or a workspace containing one, since the v1 store it reads is
-  retired there.
+- **MCP is served from the daemon** for engine:v2 repos: `grepai mcp-serve`
+  starts a daemon-backed server where `grepai_search`, `grepai_trace_*`
+  (v1-parity shapes), and `grepai_index_status` (v2 shape: generation,
+  freshness, backlog) query the daemon per call; `grepai_refs_*`,
+  `grepai_rpg_*`, and workspace parameters reject loudly per call (their v1
+  stores are retired). Workspace-mode `mcp-serve` (startup or tool-call
+  selected) still refuses workspaces containing engine:v2 members.
+- **RPG refresh and generation-scoped controlled rebuild** are not served by
+  the daemon yet.
 - **Linux only** for the daemon process paths (flock + detached spawn).

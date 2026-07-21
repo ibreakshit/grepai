@@ -253,3 +253,22 @@ func TestSymbolDefinitionsBulk(t *testing.T) {
 		t.Fatalf("empty names must be a cheap no-op: %v %v", empty, err)
 	}
 }
+
+// TestCountArtifactsMissingSymbols: count matches the list form and is
+// worktree-scoped (it backs the hot Status polling path).
+func TestCountArtifactsMissingSymbols(t *testing.T) {
+	ctx := context.Background()
+	c := openTestCatalog(t)
+	seedSymbolWorld(t, c, "r", "w", "done.go", []core.SymbolDef{{Name: "A", Kind: "function", Line: 1}}, nil, true)
+	seedSymbolWorld(t, c, "r", "w", "todo.go", nil, nil, false)
+	seedSymbolWorld(t, c, "rb", "wb", "other.go", nil, nil, false)
+
+	n, err := c.CountArtifactsMissingSymbols(ctx, "w")
+	if err != nil || n != 1 {
+		t.Fatalf("count = %d err=%v, want 1", n, err)
+	}
+	list, err := c.ArtifactsMissingSymbols(ctx, "w")
+	if err != nil || len(list) != n {
+		t.Fatalf("count (%d) and list (%d) disagree (err=%v)", n, len(list), err)
+	}
+}

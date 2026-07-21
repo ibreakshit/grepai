@@ -11,8 +11,8 @@ import (
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/daemon"
 	"github.com/yoanbernabeu/grepai/git"
-	"github.com/yoanbernabeu/grepai/internal/enginev2/core"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/traceview"
 	"github.com/yoanbernabeu/grepai/search"
 	gstats "github.com/yoanbernabeu/grepai/stats"
 	"github.com/yoanbernabeu/grepai/trace"
@@ -253,8 +253,8 @@ func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int) err
 	if err != nil {
 		return fmt.Errorf("trace: %w", err)
 	}
-	if !resp.Served || resp.Protocol < service.TraceProtocolCurrent {
-		return fmt.Errorf("the running grepaid daemon predates this trace protocol (got %d, need %d); restart it with `grepai daemon stop` — the next command auto-starts the new binary", resp.Protocol, service.TraceProtocolCurrent)
+	if perr := traceview.CheckProtocol(resp); perr != nil {
+		return perr
 	}
 	if resp.BackfillPending > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "note: symbol coverage still building (%d files pending backfill) — results may be incomplete\n", resp.BackfillPending)
@@ -271,106 +271,21 @@ func runTraceDaemon(cmd *cobra.Command, symbol, direction string, depth int) err
 	return outputAndRecord(result, view, projectRoot, commandType, count)
 }
 
-// buildTraceResult assembles a v1 trace.TraceResult from a daemon trace
-// response, mirroring v1's assembly (pickBestTargetSymbol for the callers
-// target, pickBestSymbolForFile for caller resolution, first-definition for
-// callees and graph nodes). Pure — unit-tested for shape parity.
+// buildTraceResult wraps the shared traceview.Assemble (issue #20 parity,
+// also used by the MCP server) with the CLI's view kind, gstats command type,
+// and result count.
 func buildTraceResult(symbol, direction string, depth int, resp service.TraceResponse) (trace.TraceResult, traceViewKind, string, int) {
-	symbols := symbolsAtToV1(resp.Definitions)
-	// The queried symbol's own definitions live in Definitions, not Related —
-	// a self-caller (recursion, or the extractor attributing a call site to a
-	// same-named symbol in another file) must resolve like any other endpoint,
-	// exactly as v1's LookupSymbol did.
-	related := func(name string) []trace.Symbol {
-		if name == symbol {
-			return symbols
-		}
-		return symbolsAtToV1(resp.Related[name])
-	}
-
+	result := traceview.Assemble(symbol, direction, depth, traceMode, resp)
 	switch direction {
 	case service.TraceCallees:
-		result := trace.TraceResult{Query: symbol, Mode: traceMode}
-		if len(symbols) == 0 {
-			return result, traceViewCallees, gstats.TraceCallees, 0
-		}
-		result.Symbol = &symbols[0]
-		for _, e := range resp.Edges {
-			calleeSym := trace.Symbol{Name: e.Callee}
-			if calleeSyms := related(e.Callee); len(calleeSyms) > 0 {
-				calleeSym = calleeSyms[0]
-			}
-			result.Callees = append(result.Callees, trace.CalleeInfo{
-				Symbol:   calleeSym,
-				CallSite: trace.CallSite{File: e.Path, Line: e.Line, Context: e.Context},
-			})
-		}
 		return result, traceViewCallees, gstats.TraceCallees, len(result.Callees)
-
 	case service.TraceGraph:
-		g := &trace.CallGraph{Root: symbol, Nodes: map[string]trace.Symbol{}, Edges: []trace.CallEdge{}, Depth: depth}
-		if len(symbols) > 0 {
-			g.Nodes[symbol] = symbols[0]
+		n := 0
+		if result.Graph != nil {
+			n = len(result.Graph.Nodes)
 		}
-		for _, e := range resp.Edges {
-			g.Edges = append(g.Edges, trace.CallEdge{Caller: e.Caller, Callee: e.Callee, File: e.Path, Line: e.Line})
-			for _, n := range []string{e.Caller, e.Callee} {
-				if _, ok := g.Nodes[n]; !ok {
-					if syms := related(n); len(syms) > 0 {
-						g.Nodes[n] = syms[0]
-					}
-				}
-			}
-		}
-		return trace.TraceResult{Query: symbol, Mode: traceMode, Graph: g}, traceViewGraph, gstats.TraceGraph, len(g.Nodes)
-
-	default: // service.TraceCallers
-		result := trace.TraceResult{Query: symbol, Mode: traceMode}
-		if len(symbols) == 0 {
-			return result, traceViewCallers, gstats.TraceCallers, 0
-		}
-		refs := make([]trace.Reference, 0, len(resp.Edges))
-		for _, e := range resp.Edges {
-			refs = append(refs, trace.Reference{
-				SymbolName: e.Callee, Kind: trace.RefKindCall,
-				File: e.Path, Line: e.Line, Context: e.Context,
-				CallerName: e.Caller, CallerFile: e.Path,
-			})
-		}
-		target := pickBestTargetSymbol(symbols, refs)
-		if target == nil {
-			target = &symbols[0]
-		}
-		result.Symbol = target
-		for _, e := range resp.Edges {
-			callerSym := trace.Symbol{Name: e.Caller, File: e.Path}
-			if callerSyms := related(e.Caller); len(callerSyms) > 0 {
-				if picked := pickBestSymbolForFile(callerSyms, e.Path); picked != nil {
-					callerSym = *picked
-				} else {
-					callerSym = callerSyms[0]
-				}
-			}
-			result.Callers = append(result.Callers, trace.CallerInfo{
-				Symbol:   callerSym,
-				CallSite: trace.CallSite{File: e.Path, Line: e.Line, Context: e.Context},
-			})
-		}
+		return result, traceViewGraph, gstats.TraceGraph, n
+	default:
 		return result, traceViewCallers, gstats.TraceCallers, len(result.Callers)
 	}
-}
-
-// symbolsAtToV1 converts daemon symbol definitions to v1 trace.Symbol values
-// (File <- Path; feature_path stays empty — RPG is not daemon-served).
-func symbolsAtToV1(defs []core.SymbolAt) []trace.Symbol {
-	out := make([]trace.Symbol, 0, len(defs))
-	for _, d := range defs {
-		out = append(out, trace.Symbol{
-			Name: d.Name, Kind: trace.SymbolKind(d.Kind), File: d.Path,
-			Line: d.Line, EndLine: d.EndLine, Signature: d.Signature,
-			Receiver: d.Receiver, Package: d.Package, Exported: d.Exported,
-			Language: d.Language, Docstring: d.Docstring,
-		})
-	}
-	return out
 }

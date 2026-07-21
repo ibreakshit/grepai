@@ -168,14 +168,19 @@ func writeEngineRepo(t *testing.T, engine string) string {
 	return dir
 }
 
-func TestMCPGateRejectsEngineV2Project(t *testing.T) {
+// A local engine:v2 project is no longer rejected — it gets the daemon-served
+// MCP server (issue #10). The gate only guards workspace mode now, and the
+// selector must route v2 repos to the daemon-backed constructor.
+func TestMCPGateAllowsLocalEngineV2Project(t *testing.T) {
 	dir := writeEngineRepo(t, "v2")
-	err := rejectEngineV2ForMCP(dir, "")
-	if err == nil {
-		t.Fatal("engine:v2 project must be rejected loudly — mcp-serve reads the retired v1 store")
+	if err := rejectEngineV2ForMCP(dir, ""); err != nil {
+		t.Fatalf("local engine:v2 project must pass the startup gate (daemon-served): %v", err)
 	}
-	if !strings.Contains(err.Error(), "engine: v2") {
-		t.Fatalf("error should explain the engine gate, got: %v", err)
+	if !projectRootIsEngineV2(dir) {
+		t.Fatal("selector must detect engine:v2 and route to the daemon-backed server")
+	}
+	if projectRootIsEngineV2(writeEngineRepo(t, "v1")) || projectRootIsEngineV2("") {
+		t.Fatal("v1/empty roots must not route to the daemon-backed server")
 	}
 }
 
@@ -215,5 +220,18 @@ func TestMCPGateRejectsWorkspaceWithV2Member(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "modern") {
 		t.Fatalf("error should name the v2 member, got: %v", err)
+	}
+}
+
+// A --workspace start from inside an engine:v2 repo must not hand the v2 root
+// to the v1 workspace server (its RPG/local stores are retired) — codex #10
+// merge-gate finding 1.
+func TestMCPWorkspaceModeDropsV2LocalRoot(t *testing.T) {
+	if got := mcpWorkspaceLocalRoot(writeEngineRepo(t, "v2")); got != "" {
+		t.Fatalf("v2 local root must be dropped in workspace mode, got %q", got)
+	}
+	v1dir := writeEngineRepo(t, "v1")
+	if got := mcpWorkspaceLocalRoot(v1dir); got != v1dir {
+		t.Fatalf("v1 local root must be kept, got %q", got)
 	}
 }

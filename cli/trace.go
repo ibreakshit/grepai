@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"time"
 
@@ -15,62 +14,18 @@ import (
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
 	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/traceview"
 	"github.com/yoanbernabeu/grepai/rpg"
 	gstats "github.com/yoanbernabeu/grepai/stats"
 	"github.com/yoanbernabeu/grepai/trace"
 )
 
 func pickBestTargetSymbol(candidates []trace.Symbol, refs []trace.Reference) *trace.Symbol {
-	if len(candidates) == 0 {
-		return nil
-	}
-	if len(candidates) == 1 {
-		return &candidates[0]
-	}
-
-	bestIdx := 0
-	bestScore := -1
-	for i, sym := range candidates {
-		score := 0
-		for _, ref := range refs {
-			// Prefer symbols referenced from their own file first (component-local/private usage).
-			if ref.File == sym.File || ref.CallerFile == sym.File {
-				score++
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			bestIdx = i
-		}
-	}
-
-	// Deterministic fallback when all scores are equal.
-	if bestScore <= 0 {
-		sorted := append([]trace.Symbol(nil), candidates...)
-		sort.SliceStable(sorted, func(i, j int) bool {
-			if sorted[i].File == sorted[j].File {
-				return sorted[i].Line < sorted[j].Line
-			}
-			return sorted[i].File < sorted[j].File
-		})
-		return &sorted[0]
-	}
-
-	return &candidates[bestIdx]
+	return traceview.PickBestTargetSymbol(candidates, refs)
 }
 
 func pickBestSymbolForFile(candidates []trace.Symbol, preferredFile string) *trace.Symbol {
-	if len(candidates) == 0 {
-		return nil
-	}
-	if preferredFile != "" {
-		for i := range candidates {
-			if candidates[i].File == preferredFile {
-				return &candidates[i]
-			}
-		}
-	}
-	return &candidates[0]
+	return traceview.PickBestSymbolForFile(candidates, preferredFile)
 }
 
 var (
