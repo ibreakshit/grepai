@@ -222,3 +222,16 @@ func TestMCPGateRejectsWorkspaceWithV2Member(t *testing.T) {
 		t.Fatalf("error should name the v2 member, got: %v", err)
 	}
 }
+
+// A --workspace start from inside an engine:v2 repo must not hand the v2 root
+// to the v1 workspace server (its RPG/local stores are retired) — codex #10
+// merge-gate finding 1.
+func TestMCPWorkspaceModeDropsV2LocalRoot(t *testing.T) {
+	if got := mcpWorkspaceLocalRoot(writeEngineRepo(t, "v2")); got != "" {
+		t.Fatalf("v2 local root must be dropped in workspace mode, got %q", got)
+	}
+	v1dir := writeEngineRepo(t, "v1")
+	if got := mcpWorkspaceLocalRoot(v1dir); got != v1dir {
+		t.Fatalf("v1 local root must be kept, got %q", got)
+	}
+}

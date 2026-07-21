@@ -389,7 +389,11 @@ func (s *Server) Status(ctx context.Context, req StatusRequest) (StatusResponse,
 	if err != nil {
 		return StatusResponse{}, err
 	}
-	return StatusResponse{ActiveGeneration: gen, Pending: pending, Fresh: pending == 0, DeadLetters: dl}, nil
+	resp := StatusResponse{ActiveGeneration: gen, Pending: pending, Fresh: pending == 0, DeadLetters: dl}
+	if missing, merr := s.cat.ArtifactsMissingSymbols(ctx, req.WorktreeID); merr == nil {
+		resp.SymbolsBackfillPending = len(missing)
+	}
+	return resp, nil
 }
 
 // WaitFresh blocks until none of the requested paths has a pending job, or the

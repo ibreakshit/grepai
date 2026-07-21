@@ -195,7 +195,11 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	var srv *mcp.Server
 	switch {
 	case wsName != "":
-		srv, err = mcp.NewServerWithWorkspace(projectRoot, wsName)
+		// Workspace serving is v1-store-based (v2 members are rejected above),
+		// but the LOCAL root may still be engine:v2 — its retired v1/RPG stores
+		// must be unreachable, so a v2 local root is dropped and the server
+		// runs workspace-only (supported: projectRoot may be empty).
+		srv, err = mcp.NewServerWithWorkspace(mcpWorkspaceLocalRoot(projectRoot), wsName)
 	case projectRootIsEngineV2(projectRoot):
 		// engine:v2 — query tools served from the grepaid daemon (issue #10).
 		srv, err = mcp.NewServerV2(projectRoot)
@@ -218,4 +222,15 @@ func projectRootIsEngineV2(projectRoot string) bool {
 	}
 	cfg, err := config.Load(projectRoot)
 	return err == nil && cfg.EngineV2()
+}
+
+// mcpWorkspaceLocalRoot returns the local project root a workspace-mode MCP
+// server may keep: an engine:v2 root is dropped (empty string = workspace-only
+// mode) so v1-store readers (RPG, local fallbacks) cannot touch its retired
+// indexes.
+func mcpWorkspaceLocalRoot(projectRoot string) string {
+	if projectRootIsEngineV2(projectRoot) {
+		return ""
+	}
+	return projectRoot
 }

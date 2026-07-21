@@ -291,3 +291,78 @@ func TestV1UnscopedWorkspaceWithV2MemberRejected(t *testing.T) {
 		}
 	}
 }
+
+// Codex #10 merge-gate finding 2: a project-only selector must reject, not
+// silently query the local repo.
+func TestV2TraceRejectsProjectParam(t *testing.T) {
+	s := newV2TestServer(t, &fakeBackend{traceResp: v2TraceResp()})
+	for name, call := range map[string]func() (*mcp.CallToolResult, error){
+		"callers": func() (*mcp.CallToolResult, error) {
+			return s.handleTraceCallers(context.Background(), toolRequest(map[string]any{"symbol": "X", "project": "backend"}))
+		},
+		"callees": func() (*mcp.CallToolResult, error) {
+			return s.handleTraceCallees(context.Background(), toolRequest(map[string]any{"symbol": "X", "project": "backend"}))
+		},
+		"graph": func() (*mcp.CallToolResult, error) {
+			return s.handleTraceGraph(context.Background(), toolRequest(map[string]any{"symbol": "X", "project": "backend"}))
+		},
+	} {
+		res, err := call()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !res.IsError || !strings.Contains(textResultPayload(t, res), "engine: v2") {
+			t.Fatalf("%s: project param must reject loudly under v2: %+v", name, res)
+		}
+	}
+}
+
+// Codex #10 merge-gate finding 3: backfill state must be visible — in index
+// status always, in trace output while pending (and absent at steady state so
+// the v1 shape stays byte-identical).
+func TestV2BackfillVisibility(t *testing.T) {
+	// Index status carries the count.
+	fb := &fakeBackend{statusResp: service.StatusResponse{Fresh: true, SymbolsBackfillPending: 42}}
+	s := newV2TestServer(t, fb)
+	res, err := s.handleIndexStatus(context.Background(), toolRequest(map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st V2IndexStatus
+	if jerr := json.Unmarshal([]byte(textResultPayload(t, res)), &st); jerr != nil {
+		t.Fatal(jerr)
+	}
+	if !st.Fresh || st.SymbolsBackfillPending != 42 {
+		t.Fatalf("fresh index must still expose pending symbol backfill: %+v", st)
+	}
+
+	// Trace: marker present while pending...
+	tr := v2TraceResp()
+	tr.BackfillPending = 7
+	s2 := newV2TestServer(t, &fakeBackend{traceResp: tr})
+	res2, err := s2.handleTraceCallers(context.Background(), toolRequest(map[string]any{"symbol": "Get"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(textResultPayload(t, res2), `"symbols_backfill_pending": 7`) {
+		t.Fatalf("pending backfill must mark trace output: %s", textResultPayload(t, res2))
+	}
+	// ...and absent at steady state (v1 byte-parity).
+	s3 := newV2TestServer(t, &fakeBackend{traceResp: v2TraceResp()})
+	res3, err := s3.handleTraceCallers(context.Background(), toolRequest(map[string]any{"symbol": "Get"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(textResultPayload(t, res3), "symbols_backfill_pending") {
+		t.Fatalf("steady-state trace output must stay v1-identical: %s", textResultPayload(t, res3))
+	}
+	// Compact carries the marker too.
+	s4 := newV2TestServer(t, &fakeBackend{traceResp: tr})
+	res4, err := s4.handleTraceCallers(context.Background(), toolRequest(map[string]any{"symbol": "Get", "compact": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(textResultPayload(t, res4), `"symbols_backfill_pending": 7`) {
+		t.Fatalf("compact trace must carry the backfill marker: %s", textResultPayload(t, res4))
+	}
+}

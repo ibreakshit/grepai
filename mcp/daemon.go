@@ -95,6 +95,9 @@ type V2IndexStatus struct {
 	Fresh            bool   `json:"fresh"`
 	PendingJobs      int    `json:"pending_jobs"`
 	DeadLetters      int    `json:"dead_letters"`
+	// SymbolsBackfillPending: trace coverage still building (fresh can be true
+	// while symbols are backfilled after an extractor upgrade).
+	SymbolsBackfillPending int `json:"symbols_backfill_pending"`
 }
 
 // errV2ToolResult is the loud per-call rejection for v1-only features under
@@ -148,8 +151,8 @@ func (s *Server) handleSearchDaemon(ctx context.Context, query string, limit int
 // handleTraceDaemon serves the three trace tools from the daemon (engine:v2),
 // rendering the shared v1-parity assembly (traceview) in the same shapes the
 // v1 MCP handlers emit.
-func (s *Server) handleTraceDaemon(ctx context.Context, symbol, direction string, depth int, compact bool, format, workspace string) (*mcp.CallToolResult, error) {
-	if workspace != "" {
+func (s *Server) handleTraceDaemon(ctx context.Context, symbol, direction string, depth int, compact bool, format, workspace, project string) (*mcp.CallToolResult, error) {
+	if workspace != "" || project != "" {
 		return errV2ToolResult("workspace/project trace", ""), nil
 	}
 	resp, err := s.daemon.Trace(ctx, symbol, direction, depth)
@@ -161,7 +164,10 @@ func (s *Server) handleTraceDaemon(ctx context.Context, symbol, direction string
 	}
 	result := traceview.Assemble(symbol, direction, depth, "fast", resp)
 
-	var data any = result
+	// Steady state emits the exact v1 shape; while symbol backfill is still
+	// running, an additive field marks results as potentially incomplete so
+	// agents don't treat a partial call graph as authoritative.
+	var data any = traceResultWithBackfill{TraceResult: result, SymbolsBackfillPending: resp.BackfillPending}
 	var statType string
 	var count int
 	switch direction {
@@ -169,11 +175,12 @@ func (s *Server) handleTraceDaemon(ctx context.Context, symbol, direction string
 		statType, count = stats.TraceCallees, len(result.Callees)
 		if compact {
 			out := struct {
-				Query   string              `json:"query"`
-				Mode    string              `json:"mode"`
-				Symbol  *trace.Symbol       `json:"symbol,omitempty"`
-				Callees []CalleeInfoCompact `json:"callees,omitempty"`
-			}{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol}
+				Query                  string              `json:"query"`
+				Mode                   string              `json:"mode"`
+				Symbol                 *trace.Symbol       `json:"symbol,omitempty"`
+				Callees                []CalleeInfoCompact `json:"callees,omitempty"`
+				SymbolsBackfillPending int                 `json:"symbols_backfill_pending,omitempty"`
+			}{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, SymbolsBackfillPending: resp.BackfillPending}
 			for _, c := range result.Callees {
 				out.Callees = append(out.Callees, CalleeInfoCompact{Symbol: c.Symbol, CallSite: CallSiteCompact{File: c.CallSite.File, Line: c.CallSite.Line}})
 			}
@@ -188,11 +195,12 @@ func (s *Server) handleTraceDaemon(ctx context.Context, symbol, direction string
 		statType, count = stats.TraceCallers, len(result.Callers)
 		if compact {
 			out := struct {
-				Query   string              `json:"query"`
-				Mode    string              `json:"mode"`
-				Symbol  *trace.Symbol       `json:"symbol,omitempty"`
-				Callers []CallerInfoCompact `json:"callers,omitempty"`
-			}{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol}
+				Query                  string              `json:"query"`
+				Mode                   string              `json:"mode"`
+				Symbol                 *trace.Symbol       `json:"symbol,omitempty"`
+				Callers                []CallerInfoCompact `json:"callers,omitempty"`
+				SymbolsBackfillPending int                 `json:"symbols_backfill_pending,omitempty"`
+			}{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, SymbolsBackfillPending: resp.BackfillPending}
 			for _, c := range result.Callers {
 				out.Callers = append(out.Callers, CallerInfoCompact{Symbol: c.Symbol, CallSite: CallSiteCompact{File: c.CallSite.File, Line: c.CallSite.Line}})
 			}
@@ -217,11 +225,12 @@ func (s *Server) handleIndexStatusDaemon(ctx context.Context, format, workspace 
 		return mcp.NewToolResultError(fmt.Sprintf("daemon status failed: %v", err)), nil
 	}
 	status := V2IndexStatus{
-		Engine:           "v2",
-		ActiveGeneration: int64(st.ActiveGeneration),
-		Fresh:            st.Fresh,
-		PendingJobs:      st.Pending,
-		DeadLetters:      st.DeadLetters,
+		Engine:                 "v2",
+		ActiveGeneration:       int64(st.ActiveGeneration),
+		Fresh:                  st.Fresh,
+		PendingJobs:            st.Pending,
+		DeadLetters:            st.DeadLetters,
+		SymbolsBackfillPending: st.SymbolsBackfillPending,
 	}
 	output, err := encodeOutput(status, format)
 	if err != nil {
@@ -255,4 +264,12 @@ func (s *Server) rejectV2WorkspaceMembers(workspaceName string) *mcp.CallToolRes
 		return mcp.NewToolResultError(fmt.Sprintf("workspace %q includes engine: v2 project(s) %v whose v1 indexes are retired — serving them would return empty results silently; use `grepai search-all` (CLI) or remove those projects from the workspace (ibreakshit/grepai#10)", workspaceName, v2Members))
 	}
 	return nil
+}
+
+// traceResultWithBackfill embeds the v1 TraceResult unchanged and adds an
+// additive marker while symbol backfill is running (omitted at zero, so the
+// steady-state JSON stays byte-identical to v1).
+type traceResultWithBackfill struct {
+	trace.TraceResult
+	SymbolsBackfillPending int `json:"symbols_backfill_pending,omitempty"`
 }

@@ -1116,7 +1116,7 @@ func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolReq
 
 	// engine:v2 — served from the daemon; workspace params reject inside.
 	if s.engineV2 {
-		return s.handleTraceDaemon(ctx, symbolName, service.TraceCallers, 0, compact, format, workspace)
+		return s.handleTraceDaemon(ctx, symbolName, service.TraceCallers, 0, compact, format, workspace, project)
 	}
 
 	// Workspace mode
@@ -1302,7 +1302,7 @@ func (s *Server) handleTraceCallees(ctx context.Context, request mcp.CallToolReq
 
 	// engine:v2 — served from the daemon; workspace params reject inside.
 	if s.engineV2 {
-		return s.handleTraceDaemon(ctx, symbolName, service.TraceCallees, 0, compact, format, workspace)
+		return s.handleTraceDaemon(ctx, symbolName, service.TraceCallees, 0, compact, format, workspace, project)
 	}
 
 	// Workspace mode
@@ -1493,7 +1493,7 @@ func (s *Server) handleTraceGraph(ctx context.Context, request mcp.CallToolReque
 
 	// engine:v2 — served from the daemon; workspace params reject inside.
 	if s.engineV2 {
-		return s.handleTraceDaemon(ctx, symbolName, service.TraceGraph, depth, false, format, workspace)
+		return s.handleTraceDaemon(ctx, symbolName, service.TraceGraph, depth, false, format, workspace, project)
 	}
 
 	// Workspace mode: merge call graphs across projects

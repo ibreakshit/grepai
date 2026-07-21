@@ -136,6 +136,10 @@ type StatusResponse struct {
 	Pending          int  // active index jobs for the worktree
 	Fresh            bool // true when Pending == 0
 	DeadLetters      int  // host-wide dead-letter count (coarse this phase)
+	// SymbolsBackfillPending counts active-view artifacts whose symbols are
+	// still behind the current extractor version: Fresh can be true (search is
+	// complete) while trace coverage is still building.
+	SymbolsBackfillPending int
 }
 
 // WaitFreshRequest waits for selected paths to become fresh with a deadline.
