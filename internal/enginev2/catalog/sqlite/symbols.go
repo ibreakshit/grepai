@@ -169,3 +169,16 @@ func (c *Catalog) SymbolDefinitionsBulk(ctx context.Context, wt core.WorktreeID,
 	}
 	return out, nil
 }
+
+// CountArtifactsMissingSymbols is the count-only form of
+// ArtifactsMissingSymbols for hot paths (Status is polled every 500ms by
+// `grepai watch`): no row materialization, single aggregate.
+func (c *Catalog) CountArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) (int, error) {
+	var n int
+	err := c.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM worktree_files wf
+		JOIN file_artifacts fa ON fa.artifact_id = wf.artifact_id
+		WHERE wf.worktree_id=? AND fa.symbols_version < ?`, string(wt), SymbolsVersionCurrent).Scan(&n)
+	return n, err
+}

@@ -183,7 +183,8 @@ func TestV2TraceRejectsOldDaemon(t *testing.T) {
 }
 
 func TestV2IndexStatusFromDaemon(t *testing.T) {
-	fb := &fakeBackend{statusResp: service.StatusResponse{ActiveGeneration: 2, Pending: 5, Fresh: false, DeadLetters: 1}}
+	zero := 0
+	fb := &fakeBackend{statusResp: service.StatusResponse{ActiveGeneration: 2, Pending: 5, Fresh: false, DeadLetters: 1, SymbolsBackfillPending: &zero}}
 	s := newV2TestServer(t, fb)
 	res, err := s.handleIndexStatus(context.Background(), toolRequest(map[string]any{}))
 	if err != nil {
@@ -322,7 +323,8 @@ func TestV2TraceRejectsProjectParam(t *testing.T) {
 // the v1 shape stays byte-identical).
 func TestV2BackfillVisibility(t *testing.T) {
 	// Index status carries the count.
-	fb := &fakeBackend{statusResp: service.StatusResponse{Fresh: true, SymbolsBackfillPending: 42}}
+	pending42 := 42
+	fb := &fakeBackend{statusResp: service.StatusResponse{Fresh: true, SymbolsBackfillPending: &pending42}}
 	s := newV2TestServer(t, fb)
 	res, err := s.handleIndexStatus(context.Background(), toolRequest(map[string]any{}))
 	if err != nil {
@@ -364,5 +366,67 @@ func TestV2BackfillVisibility(t *testing.T) {
 	}
 	if !strings.Contains(textResultPayload(t, res4), `"symbols_backfill_pending": 7`) {
 		t.Fatalf("compact trace must carry the backfill marker: %s", textResultPayload(t, res4))
+	}
+}
+
+// Codex #10 round-2 finding 1: TOON output must not nest under an embedded
+// struct name, must use the exact marker key, and must omit the marker at
+// steady state — for full and compact, pending and zero.
+func TestV2TraceTOONShapes(t *testing.T) {
+	pending := v2TraceResp()
+	pending.BackfillPending = 7
+	// NOTE: v1's own structs carry ",omitempty" tags that gotoon renders
+	// literally — that noise is v1 TOON behavior and thus parity. Only the
+	// MARKER key must be clean, and nothing may nest under "TraceResult".
+	for name, tc := range map[string]struct {
+		resp   service.TraceResponse
+		args   map[string]any
+		want   []string
+		forbid []string
+	}{
+		"full_zero":       {v2TraceResp(), map[string]any{"symbol": "Get", "format": "toon"}, []string{"query", "callers"}, []string{"symbols_backfill_pending", "TraceResult"}},
+		"full_pending":    {pending, map[string]any{"symbol": "Get", "format": "toon"}, []string{"symbols_backfill_pending"}, []string{"TraceResult", "symbols_backfill_pending,omitempty"}},
+		"compact_zero":    {v2TraceResp(), map[string]any{"symbol": "Get", "format": "toon", "compact": true}, []string{"call_site"}, []string{"symbols_backfill_pending"}},
+		"compact_pending": {pending, map[string]any{"symbol": "Get", "format": "toon", "compact": true}, []string{"symbols_backfill_pending"}, []string{"symbols_backfill_pending,omitempty"}},
+	} {
+		s := newV2TestServer(t, &fakeBackend{traceResp: tc.resp})
+		res, err := s.handleTraceCallers(context.Background(), toolRequest(tc.args))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		payload := textResultPayload(t, res)
+		for _, w := range tc.want {
+			if !strings.Contains(payload, w) {
+				t.Fatalf("%s: %q missing in TOON output:\n%s", name, w, payload)
+			}
+		}
+		for _, f := range tc.forbid {
+			if strings.Contains(payload, f) {
+				t.Fatalf("%s: %q must not appear in TOON output:\n%s", name, f, payload)
+			}
+		}
+	}
+	// Graph pending via JSON keeps the flat marker too.
+	s := newV2TestServer(t, &fakeBackend{traceResp: pending})
+	res, err := s.handleTraceGraph(context.Background(), toolRequest(map[string]any{"symbol": "Get"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := textResultPayload(t, res)
+	if !strings.Contains(p, `"graph"`) || !strings.Contains(p, `"symbols_backfill_pending": 7`) {
+		t.Fatalf("graph pending output wrong: %s", p)
+	}
+}
+
+// Codex #10 round-2 finding 2: a resident daemon predating backfill reporting
+// (nil sentinel) must be rejected loudly, never read as zero.
+func TestV2IndexStatusRejectsOldDaemon(t *testing.T) {
+	s := newV2TestServer(t, &fakeBackend{statusResp: service.StatusResponse{Fresh: true}})
+	res, err := s.handleIndexStatus(context.Background(), toolRequest(map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(textResultPayload(t, res), "restart") {
+		t.Fatalf("nil backfill sentinel must demand a restart: %+v", res)
 	}
 }

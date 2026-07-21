@@ -138,8 +138,10 @@ type StatusResponse struct {
 	DeadLetters      int  // host-wide dead-letter count (coarse this phase)
 	// SymbolsBackfillPending counts active-view artifacts whose symbols are
 	// still behind the current extractor version: Fresh can be true (search is
-	// complete) while trace coverage is still building.
-	SymbolsBackfillPending int
+	// complete) while trace coverage is still building. Pointer as a presence
+	// sentinel: a daemon predating this field decodes to nil, which clients
+	// must treat as UNKNOWN (restart the daemon), never as zero.
+	SymbolsBackfillPending *int
 }
 
 // WaitFreshRequest waits for selected paths to become fresh with a deadline.

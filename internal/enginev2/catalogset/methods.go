@@ -201,6 +201,14 @@ func (s *Set) SymbolDefinitionsBulk(ctx context.Context, wt core.WorktreeID, nam
 	return c.SymbolDefinitionsBulk(ctx, wt, names)
 }
 
+func (s *Set) CountArtifactsMissingSymbols(ctx context.Context, wt core.WorktreeID) (int, error) {
+	c, err := s.getByWT(wt)
+	if err != nil {
+		return 0, err
+	}
+	return c.CountArtifactsMissingSymbols(ctx, wt)
+}
+
 // SymbolEdges resolves trace call edges through the worktree's view.
 func (s *Set) SymbolEdges(ctx context.Context, wt core.WorktreeID, name string, callersOf bool) ([]core.EdgeAt, error) {
 	c, err := s.getByWT(wt)

@@ -164,27 +164,33 @@ func (s *Server) handleTraceDaemon(ctx context.Context, symbol, direction string
 	}
 	result := traceview.Assemble(symbol, direction, depth, "fast", resp)
 
-	// Steady state emits the exact v1 shape; while symbol backfill is still
-	// running, an additive field marks results as potentially incomplete so
-	// agents don't treat a partial call graph as authoritative.
-	var data any = traceResultWithBackfill{TraceResult: result, SymbolsBackfillPending: resp.BackfillPending}
+	// Steady state emits the exact v1 shape (result verbatim). While symbol
+	// backfill is running, a FLAT marker struct is used instead — no embedding
+	// and no tag options, because the TOON encoder neither flattens embedded
+	// structs nor parses ",omitempty" (codex round-2 finding).
+	var data any = result
+	if resp.BackfillPending > 0 {
+		data = tracePendingResult{
+			Query: result.Query, Mode: result.Mode, Symbol: result.Symbol,
+			Callers: result.Callers, Callees: result.Callees, Graph: result.Graph,
+			SymbolsBackfillPending: resp.BackfillPending,
+		}
+	}
 	var statType string
 	var count int
 	switch direction {
 	case service.TraceCallees:
 		statType, count = stats.TraceCallees, len(result.Callees)
 		if compact {
-			out := struct {
-				Query                  string              `json:"query"`
-				Mode                   string              `json:"mode"`
-				Symbol                 *trace.Symbol       `json:"symbol,omitempty"`
-				Callees                []CalleeInfoCompact `json:"callees,omitempty"`
-				SymbolsBackfillPending int                 `json:"symbols_backfill_pending,omitempty"`
-			}{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, SymbolsBackfillPending: resp.BackfillPending}
+			var callees []CalleeInfoCompact
 			for _, c := range result.Callees {
-				out.Callees = append(out.Callees, CalleeInfoCompact{Symbol: c.Symbol, CallSite: CallSiteCompact{File: c.CallSite.File, Line: c.CallSite.Line}})
+				callees = append(callees, CalleeInfoCompact{Symbol: c.Symbol, CallSite: CallSiteCompact{File: c.CallSite.File, Line: c.CallSite.Line}})
 			}
-			data = out
+			if resp.BackfillPending > 0 {
+				data = compactCalleesPending{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, Callees: callees, SymbolsBackfillPending: resp.BackfillPending}
+			} else {
+				data = compactCallees{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, Callees: callees}
+			}
 		}
 	case service.TraceGraph:
 		statType = stats.TraceGraph
@@ -194,17 +200,15 @@ func (s *Server) handleTraceDaemon(ctx context.Context, symbol, direction string
 	default:
 		statType, count = stats.TraceCallers, len(result.Callers)
 		if compact {
-			out := struct {
-				Query                  string              `json:"query"`
-				Mode                   string              `json:"mode"`
-				Symbol                 *trace.Symbol       `json:"symbol,omitempty"`
-				Callers                []CallerInfoCompact `json:"callers,omitempty"`
-				SymbolsBackfillPending int                 `json:"symbols_backfill_pending,omitempty"`
-			}{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, SymbolsBackfillPending: resp.BackfillPending}
+			var callers []CallerInfoCompact
 			for _, c := range result.Callers {
-				out.Callers = append(out.Callers, CallerInfoCompact{Symbol: c.Symbol, CallSite: CallSiteCompact{File: c.CallSite.File, Line: c.CallSite.Line}})
+				callers = append(callers, CallerInfoCompact{Symbol: c.Symbol, CallSite: CallSiteCompact{File: c.CallSite.File, Line: c.CallSite.Line}})
 			}
-			data = out
+			if resp.BackfillPending > 0 {
+				data = compactCallersPending{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, Callers: callers, SymbolsBackfillPending: resp.BackfillPending}
+			} else {
+				data = compactCallers{Query: result.Query, Mode: result.Mode, Symbol: result.Symbol, Callers: callers}
+			}
 		}
 	}
 	output, err := encodeOutput(data, format)
@@ -224,13 +228,19 @@ func (s *Server) handleIndexStatusDaemon(ctx context.Context, format, workspace 
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("daemon status failed: %v", err)), nil
 	}
+	// nil = the resident daemon predates backfill reporting; zero would be a
+	// false "coverage complete", so demand a restart instead (same contract as
+	// the trace Protocol gate).
+	if st.SymbolsBackfillPending == nil {
+		return mcp.NewToolResultError("the running grepaid daemon predates symbol-backfill reporting; restart it with `grepai daemon stop` — the next command auto-starts the new binary"), nil
+	}
 	status := V2IndexStatus{
 		Engine:                 "v2",
 		ActiveGeneration:       int64(st.ActiveGeneration),
 		Fresh:                  st.Fresh,
 		PendingJobs:            st.Pending,
 		DeadLetters:            st.DeadLetters,
-		SymbolsBackfillPending: st.SymbolsBackfillPending,
+		SymbolsBackfillPending: *st.SymbolsBackfillPending,
 	}
 	output, err := encodeOutput(status, format)
 	if err != nil {
@@ -266,10 +276,48 @@ func (s *Server) rejectV2WorkspaceMembers(workspaceName string) *mcp.CallToolRes
 	return nil
 }
 
-// traceResultWithBackfill embeds the v1 TraceResult unchanged and adds an
-// additive marker while symbol backfill is running (omitted at zero, so the
-// steady-state JSON stays byte-identical to v1).
-type traceResultWithBackfill struct {
-	trace.TraceResult
-	SymbolsBackfillPending int `json:"symbols_backfill_pending,omitempty"`
+// tracePendingResult is the FLAT pending-backfill trace shape: identical
+// fields/tags to trace.TraceResult plus the marker. Used only when
+// BackfillPending > 0 (steady state emits trace.TraceResult verbatim). Flat
+// on purpose: the TOON encoder neither flattens embedded structs nor parses
+// json tag options, so no embedding and no ",omitempty" here.
+type tracePendingResult struct {
+	Query                  string             `json:"query"`
+	Mode                   string             `json:"mode"`
+	Symbol                 *trace.Symbol      `json:"symbol,omitempty"`
+	Callers                []trace.CallerInfo `json:"callers,omitempty"`
+	Callees                []trace.CalleeInfo `json:"callees,omitempty"`
+	Graph                  *trace.CallGraph   `json:"graph,omitempty"`
+	SymbolsBackfillPending int                `json:"symbols_backfill_pending"`
+}
+
+// Compact shapes, marker-less (steady state) and marked (backfill pending).
+type compactCallers struct {
+	Query   string              `json:"query"`
+	Mode    string              `json:"mode"`
+	Symbol  *trace.Symbol       `json:"symbol,omitempty"`
+	Callers []CallerInfoCompact `json:"callers,omitempty"`
+}
+
+type compactCallersPending struct {
+	Query                  string              `json:"query"`
+	Mode                   string              `json:"mode"`
+	Symbol                 *trace.Symbol       `json:"symbol,omitempty"`
+	Callers                []CallerInfoCompact `json:"callers,omitempty"`
+	SymbolsBackfillPending int                 `json:"symbols_backfill_pending"`
+}
+
+type compactCallees struct {
+	Query   string              `json:"query"`
+	Mode    string              `json:"mode"`
+	Symbol  *trace.Symbol       `json:"symbol,omitempty"`
+	Callees []CalleeInfoCompact `json:"callees,omitempty"`
+}
+
+type compactCalleesPending struct {
+	Query                  string              `json:"query"`
+	Mode                   string              `json:"mode"`
+	Symbol                 *trace.Symbol       `json:"symbol,omitempty"`
+	Callees                []CalleeInfoCompact `json:"callees,omitempty"`
+	SymbolsBackfillPending int                 `json:"symbols_backfill_pending"`
 }
