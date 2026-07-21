@@ -50,6 +50,9 @@ func newV2TestServer(t *testing.T, fb *fakeBackend) *Server {
 		t.Fatal(err)
 	}
 	s.daemon = fb
+	// Stats recording is fire-and-forget (recordMCPStats spawns a goroutine)
+	// and would race t.TempDir cleanup; nil disables it deterministically.
+	s.recorder = nil
 	return s
 }
 
