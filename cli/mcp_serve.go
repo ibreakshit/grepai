@@ -147,18 +147,13 @@ func resolveMCPTarget(explicitPath, workspaceName string) (string, string, error
 	return "", "", fmt.Errorf("no grepai project or workspace found (run 'grepai init' or use --workspace)")
 }
 
-// rejectEngineV2ForMCP enforces the loud-failure contract for MCP: the MCP
-// server reads the v1 store, and on an engine:v2 repo the v1 index is retired —
-// serving it would return empty results with no error (issue #8). Until MCP is
-// served from the daemon (issue #10), an engine:v2 project — or a workspace
-// containing one — refuses to start, loudly. A project whose config cannot be
-// loaded is left to fail downstream exactly as before.
+// rejectEngineV2ForMCP enforces the loud-failure contract for MCP workspace
+// mode: workspace serving reads v1 stores, and an engine:v2 member's v1 index
+// is retired — serving it would return empty results with no error (issue #8).
+// A LOCAL engine:v2 project is fine (it gets the daemon-served MCP server,
+// issue #10); only workspaces containing v2 members refuse to start. A project
+// whose config cannot be loaded is left to fail downstream exactly as before.
 func rejectEngineV2ForMCP(projectRoot, wsName string) error {
-	if projectRoot != "" {
-		if cfg, err := config.Load(projectRoot); err == nil && cfg.EngineV2() {
-			return fmt.Errorf("mcp-serve is not supported under engine: v2 yet (%s): the v1 index it serves is retired on this repo, and serving it would return empty results silently. Use the CLI (`grepai search`, `grepai search-all`) until MCP is daemon-served (ibreakshit/grepai#10)", projectRoot)
-		}
-	}
 	if wsName != "" {
 		wcfg, err := config.LoadWorkspaceConfig()
 		if err != nil || wcfg == nil {
@@ -198,9 +193,13 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	}
 
 	var srv *mcp.Server
-	if wsName != "" {
+	switch {
+	case wsName != "":
 		srv, err = mcp.NewServerWithWorkspace(projectRoot, wsName)
-	} else {
+	case projectRootIsEngineV2(projectRoot):
+		// engine:v2 — query tools served from the grepaid daemon (issue #10).
+		srv, err = mcp.NewServerV2(projectRoot)
+	default:
 		srv, err = mcp.NewServer(projectRoot)
 	}
 	if err != nil {
@@ -208,4 +207,15 @@ func runMCPServe(cmd *cobra.Command, args []string) error {
 	}
 
 	return srv.Serve()
+}
+
+// projectRootIsEngineV2 reports whether the local project is on the v2 engine.
+// A missing/broken config reads as v1 (the classic server surfaces the error
+// exactly as before).
+func projectRootIsEngineV2(projectRoot string) bool {
+	if projectRoot == "" {
+		return false
+	}
+	cfg, err := config.Load(projectRoot)
+	return err == nil && cfg.EngineV2()
 }

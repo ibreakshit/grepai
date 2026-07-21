@@ -21,6 +21,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/yoanbernabeu/grepai/internal/enginev2/service"
 	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/search"
 	"github.com/yoanbernabeu/grepai/stats"
@@ -34,6 +35,10 @@ type Server struct {
 	projectRoot   string
 	workspaceName string // non-empty when started via --workspace or auto-detect
 	recorder      *stats.Recorder
+	// engineV2 routes query tools to the grepaid daemon (issue #10). The v1
+	// stores are retired on such repos; v1-only tools reject loudly per call.
+	engineV2 bool
+	daemon   daemonBackend
 }
 
 // SearchResult is a lightweight struct for MCP output.
@@ -138,6 +143,29 @@ func NewServer(projectRoot string) (*Server, error) {
 	)
 
 	// Register tools
+	s.registerTools()
+
+	return s, nil
+}
+
+// NewServerV2 creates an MCP server for an engine:v2 repo: query tools
+// (search, trace, index status) are served from the grepaid daemon; v1-only
+// tools (refs, RPG, workspace serving) reject loudly per call. Workspace mode
+// is not combined with v2 (the CLI startup gate enforces that).
+func NewServerV2(projectRoot string) (*Server, error) {
+	s := &Server{
+		projectRoot: projectRoot,
+		recorder:    stats.NewRecorder(projectRoot),
+		engineV2:    true,
+		daemon:      &rpcBackend{root: projectRoot},
+	}
+
+	s.mcpServer = server.NewMCPServer(
+		"grepai",
+		"1.0.0",
+		server.WithToolCapabilities(false),
+	)
+
 	s.registerTools()
 
 	return s, nil
@@ -457,8 +485,16 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
 	}
 
+	// engine:v2 — served from the daemon; workspace params reject inside.
+	if s.engineV2 {
+		return s.handleSearchDaemon(ctx, query, limit, compact, format, path, workspace, projects)
+	}
+
 	// Workspace mode
 	if workspace != "" {
+		if reject := s.rejectV2WorkspaceMembers(workspace); reject != nil {
+			return reject, nil
+		}
 		return s.handleWorkspaceSearch(ctx, query, limit, compact, format, path, workspace, projects)
 	}
 
@@ -1078,8 +1114,16 @@ func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolReq
 		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
 	}
 
+	// engine:v2 — served from the daemon; workspace params reject inside.
+	if s.engineV2 {
+		return s.handleTraceDaemon(ctx, symbolName, service.TraceCallers, 0, compact, format, workspace)
+	}
+
 	// Workspace mode
 	if workspace != "" {
+		if reject := s.rejectV2WorkspaceMembers(workspace); reject != nil {
+			return reject, nil
+		}
 		stores, loadErr := trace.LoadWorkspaceSymbolStores(ctx, workspace, project)
 		if loadErr != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to load workspace symbol stores: %v", loadErr)), nil
@@ -1256,8 +1300,16 @@ func (s *Server) handleTraceCallees(ctx context.Context, request mcp.CallToolReq
 		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
 	}
 
+	// engine:v2 — served from the daemon; workspace params reject inside.
+	if s.engineV2 {
+		return s.handleTraceDaemon(ctx, symbolName, service.TraceCallees, 0, compact, format, workspace)
+	}
+
 	// Workspace mode
 	if workspace != "" {
+		if reject := s.rejectV2WorkspaceMembers(workspace); reject != nil {
+			return reject, nil
+		}
 		stores, loadErr := trace.LoadWorkspaceSymbolStores(ctx, workspace, project)
 		if loadErr != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to load workspace symbol stores: %v", loadErr)), nil
@@ -1439,8 +1491,16 @@ func (s *Server) handleTraceGraph(ctx context.Context, request mcp.CallToolReque
 		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
 	}
 
+	// engine:v2 — served from the daemon; workspace params reject inside.
+	if s.engineV2 {
+		return s.handleTraceDaemon(ctx, symbolName, service.TraceGraph, depth, false, format, workspace)
+	}
+
 	// Workspace mode: merge call graphs across projects
 	if workspace != "" {
+		if reject := s.rejectV2WorkspaceMembers(workspace); reject != nil {
+			return reject, nil
+		}
 		stores, loadErr := trace.LoadWorkspaceSymbolStores(ctx, workspace, project)
 		if loadErr != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to load workspace symbol stores: %v", loadErr)), nil
@@ -1555,6 +1615,9 @@ func (s *Server) handleRefsWriters(ctx context.Context, request mcp.CallToolRequ
 }
 
 func (s *Server) handleRefsGraph(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.engineV2 {
+		return errV2ToolResult("refs", "call-graph queries are served by grepai_trace_*"), nil
+	}
 	symbolName, err := request.RequireString("symbol")
 	if err != nil {
 		return mcp.NewToolResultError("symbol parameter is required"), nil
@@ -1571,6 +1634,9 @@ func (s *Server) handleRefsGraph(ctx context.Context, request mcp.CallToolReques
 
 	var stores []trace.SymbolStore
 	if workspace != "" {
+		if reject := s.rejectV2WorkspaceMembers(workspace); reject != nil {
+			return reject, nil
+		}
 		stores, err = trace.LoadWorkspaceSymbolStores(ctx, workspace, project)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to load workspace symbol stores: %v", err)), nil
@@ -1675,6 +1741,9 @@ func (s *Server) handleRefsGraph(ctx context.Context, request mcp.CallToolReques
 }
 
 func (s *Server) handleRefsByKind(ctx context.Context, request mcp.CallToolRequest, kind string) (*mcp.CallToolResult, error) {
+	if s.engineV2 {
+		return errV2ToolResult("refs", "call-graph queries are served by grepai_trace_*"), nil
+	}
 	symbolName, err := request.RequireString("symbol")
 	if err != nil {
 		return mcp.NewToolResultError("symbol parameter is required"), nil
@@ -1691,6 +1760,9 @@ func (s *Server) handleRefsByKind(ctx context.Context, request mcp.CallToolReque
 
 	// Workspace mode
 	if workspace != "" {
+		if reject := s.rejectV2WorkspaceMembers(workspace); reject != nil {
+			return reject, nil
+		}
 		stores, loadErr := trace.LoadWorkspaceSymbolStores(ctx, workspace, project)
 		if loadErr != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to load workspace symbol stores: %v", loadErr)), nil
@@ -1834,8 +1906,16 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcp.CallToolRequ
 		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
 	}
 
+	// engine:v2 — served from the daemon; workspace param rejects inside.
+	if s.engineV2 {
+		return s.handleIndexStatusDaemon(ctx, format, workspace)
+	}
+
 	// Workspace mode
 	if workspace != "" {
+		if reject := s.rejectV2WorkspaceMembers(workspace); reject != nil {
+			return reject, nil
+		}
 		wsCfg, err := config.LoadWorkspaceConfig()
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to load workspace config: %v", err)), nil
@@ -2168,6 +2248,9 @@ func (s *Server) tryLoadRPG(ctx context.Context) (rpg.RPGStore, *rpg.QueryEngine
 
 // handleRPGSearch handles the grepai_rpg_search tool call.
 func (s *Server) handleRPGSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.engineV2 {
+		return errV2ToolResult("RPG", ""), nil
+	}
 	query, err := request.RequireString("query")
 	if err != nil {
 		return mcp.NewToolResultError("query parameter is required"), nil
@@ -2246,6 +2329,9 @@ func (s *Server) handleRPGSearch(ctx context.Context, request mcp.CallToolReques
 
 // handleRPGFetch handles the grepai_rpg_fetch tool call.
 func (s *Server) handleRPGFetch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.engineV2 {
+		return errV2ToolResult("RPG", ""), nil
+	}
 	nodeID, err := request.RequireString("node_id")
 	if err != nil {
 		return mcp.NewToolResultError("node_id parameter is required"), nil
@@ -2292,6 +2378,9 @@ func (s *Server) handleRPGFetch(ctx context.Context, request mcp.CallToolRequest
 
 // handleRPGExplore handles the grepai_rpg_explore tool call.
 func (s *Server) handleRPGExplore(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.engineV2 {
+		return errV2ToolResult("RPG", ""), nil
+	}
 	startNodeID, err := request.RequireString("start_node_id")
 	if err != nil {
 		return mcp.NewToolResultError("start_node_id parameter is required"), nil

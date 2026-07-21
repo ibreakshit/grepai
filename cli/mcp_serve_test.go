@@ -168,14 +168,19 @@ func writeEngineRepo(t *testing.T, engine string) string {
 	return dir
 }
 
-func TestMCPGateRejectsEngineV2Project(t *testing.T) {
+// A local engine:v2 project is no longer rejected — it gets the daemon-served
+// MCP server (issue #10). The gate only guards workspace mode now, and the
+// selector must route v2 repos to the daemon-backed constructor.
+func TestMCPGateAllowsLocalEngineV2Project(t *testing.T) {
 	dir := writeEngineRepo(t, "v2")
-	err := rejectEngineV2ForMCP(dir, "")
-	if err == nil {
-		t.Fatal("engine:v2 project must be rejected loudly — mcp-serve reads the retired v1 store")
+	if err := rejectEngineV2ForMCP(dir, ""); err != nil {
+		t.Fatalf("local engine:v2 project must pass the startup gate (daemon-served): %v", err)
 	}
-	if !strings.Contains(err.Error(), "engine: v2") {
-		t.Fatalf("error should explain the engine gate, got: %v", err)
+	if !projectRootIsEngineV2(dir) {
+		t.Fatal("selector must detect engine:v2 and route to the daemon-backed server")
+	}
+	if projectRootIsEngineV2(writeEngineRepo(t, "v1")) || projectRootIsEngineV2("") {
+		t.Fatal("v1/empty roots must not route to the daemon-backed server")
 	}
 }
 
